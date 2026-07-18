@@ -1,0 +1,72 @@
+# Virtual Environment
+.venv
+
+# Environment variables
+.env
+
+# Pycache
+static_analysis/scripts/__pycache__
+
+# pyc files
+*.pyc
+
+# Repomix
+repomix-output.txt
+
+# Test files
+static_analysis/test_contracts
+
+frontend_poc/uploads
+
+# Node modules
+node_modules
+static_analysis/test_contracts/sample.sol
+
+# benchmark files
+# benchmark_data
+# benchmark_data_no_errors
+
+# Exploit PoCs
+exploit/src/test
+
+# Logs
+benchmark_evaluation.log
+ctfbench_evaluation.log
+.DS_Store
+token_usage_stats.json
+.DS_Store
+
+# Ignore all Pycache
+**/__pycache__/
+
+# VS Code
+.vscode/
+
+# Python cache
+.pytest_cache/
+.mypy_cache/
+
+# Build outputs
+build/
+dist/
+
+# Foundry build artifacts
+exploit/cache/
+exploit/out/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Performance metrics
+performance_metrics_*.json
+
+# Reports
+reports/*.json
+reports/*.md
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Windows
+Thumbs.db
