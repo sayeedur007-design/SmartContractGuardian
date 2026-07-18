@@ -92,8 +92,10 @@ class AnalyzerAgent:
             return {"vulnerabilities": vulnerabilities}
 
         except Exception as e:
-            print_warning(f"Analysis error: {str(e)}")
-            return {"vulnerabilities": [], "error": str(e)}
+            import traceback
+            traceback.print_exc()
+            print_warning(f"Analysis error: {repr(e)}")
+            return {"vulnerabilities": [], "error": repr(e)}
 
     def _build_query_text(self, contract_info: Dict) -> str:
         """Small summary of the user’s contract to retrieve related vulnerabilities."""
@@ -295,40 +297,61 @@ Format findings as:
                 completion_tokens=resp.usage.completion_tokens,
                 total_tokens=resp.usage.total_tokens
             )
-            
-        return resp.choices[0].message.content.strip()
+        response_text = resp.choices[0].message.content
 
-    def _parse_llm_response(self, response_text: str) -> List[Dict]:
-        """
-        Attempt to parse the LLM's response as JSON.
-        Fallback to searching for code blocks if raw parse fails.
-        """
+        with open("raw_llm_response.txt", "w", encoding="utf-8") as f:
+            f.write(response_text)
+
+        print("\n========== RAW LLM RESPONSE ==========")
+        print(response_text[:1000])
+        print("... (full response saved to raw_llm_response.txt)")
+        print("=====================================\n")
+
+        return response_text.strip()   
+            
+    
+
+    def _parse_llm_response(self, response_text: str):
+        import json
         import re
 
+        # Try direct JSON
         try:
             data = json.loads(response_text)
             return data.get("vulnerabilities", [])
-        except json.JSONDecodeError:
-            # fallback: search for triple backtick blocks
-            match = re.search(r"```(?:json)?(.*?)```", response_text, re.DOTALL)
-            if match:
-                block = match.group(1).strip()
-                try:
-                    data = json.loads(block)
-                    return data.get("vulnerabilities", [])
-                except:
-                    pass
-            # ultimate fallback
-            return [
-                {
-                    "vulnerability_type": "unknown",
-                    "confidence_score": 0.0,
-                    "reasoning": "No valid JSON found",
-                    "affected_functions": [],
-                    "impact": "",
-                    "exploitation_scenario": "",
-                }
-            ]
+        except Exception:
+            pass
+
+        # Extract markdown JSON block
+        match = re.search(r"```json\s*(.*?)\s*```", response_text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(1))
+                return data.get("vulnerabilities", [])
+            except Exception as e:
+                print(f"Markdown JSON parse failed: {e}")
+
+        # Extract first JSON object
+        match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+                return data.get("vulnerabilities", [])
+            except Exception as e:
+                print(f"Object JSON parse failed: {e}")
+
+        print("\n========== FAILED RESPONSE ==========")
+        print(response_text)
+        print("=====================================\n")
+
+        return [{
+            "vulnerability_type": "unknown",
+            "confidence_score": 0.0,
+            "reasoning": "No valid JSON found",
+            "affected_functions": [],
+            "impact": "",
+            "exploitation_scenario": ""
+        }]
 
     def _attach_code_snippets(self, vulnerabilities: list, contract_info: dict):
         """

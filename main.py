@@ -16,11 +16,11 @@ def parse_arguments():
     parser = argparse.ArgumentParser(description="Smart Contract Vulnerability Analyzer")
 
     # Add model configuration arguments
-    parser.add_argument("--analyzer-model", default="o3-mini", help="Model for analyzer agent")
-    parser.add_argument("--skeptic-model", default="o3-mini", help="Model for skeptic agent")
-    parser.add_argument("--exploiter-model", default="o3-mini", help="Model for exploiter agent")
-    parser.add_argument("--generator-model", default="o3-mini", help="Model for generator agent")
-    parser.add_argument("--context-model", default="o3-mini", help="Model for context agent")
+    parser.add_argument("--analyzer-model", default="qwen2.5-coder:7b", help="Model for analyzer agent")
+    parser.add_argument("--skeptic-model", default="qwen2.5-coder:7b", help="Model for skeptic agent")
+    parser.add_argument("--exploiter-model", default="qwen2.5-coder:7b", help="Model for exploiter agent")
+    parser.add_argument("--generator-model", default="qwen2.5-coder:7b", help="Model for generator agent")
+    parser.add_argument("--context-model", default="qwen2.5-coder:7b", help="Model for context agent")
     parser.add_argument("--all-models", help="Use this model for all agents")
     parser.add_argument("--api-base", help="Base URL for OpenAI API")
 
