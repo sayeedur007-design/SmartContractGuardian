@@ -34,11 +34,11 @@ class AgentCoordinator:
         # Initialize retriever only if RAG is enabled
         if self.use_rag:
             self.vuln_retriever = get_vuln_retriever_from_json(
-                json_path="known_vulnerabilities/contract_vulns.json",
-                base_dataset_dir="known_vulnerabilities",
-                index_name="fyp",
-                top_k=3,
-            )
+            json_path="known_vulnerabilities/contract_vulns.json",
+            base_dataset_dir="known_vulnerabilities",
+            persist_directory="./chroma_db",
+            top_k=3,
+)
         else:
             self.vuln_retriever = None
 

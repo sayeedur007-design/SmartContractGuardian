@@ -23,7 +23,13 @@ from llm_agents.config import ModelConfig
 from llm_agents.agents.runner import ExploitRunner
 from utils.token_tracker import performance_tracker
 
-app = Flask(__name__, static_folder='build')
+app = Flask(
+    __name__,
+    static_folder=os.path.join(os.path.dirname(__file__), "build"),
+    static_url_path=""
+)
+
+print("Static folder:", app.static_folder)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 

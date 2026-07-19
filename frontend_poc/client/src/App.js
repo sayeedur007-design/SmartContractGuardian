@@ -30,16 +30,17 @@ function App() {
   const [projectContextData, setProjectContextData] = useState({});
   const [performanceMetrics, setPerformanceMetrics] = useState(null);
   const [analysisOptions, setAnalysisOptions] = useState({
-    analyzer_model: "o3-mini",
-    skeptic_model: "o3-mini",
-    exploiter_model: "o3-mini",
-    generator_model: "o3-mini",
-    auto_run: true,
-    max_retries: 3,
-    use_rag: true,
-    skip_poc_generation: false,
-    export_markdown: false,
-  });
+  context_model: "ollama",
+  analyzer_model: "ollama",
+  skeptic_model: "ollama",
+  exploiter_model: "ollama",
+  generator_model: "ollama",
+  auto_run: true,
+  max_retries: 3,
+  use_rag: true,
+  skip_poc_generation: false,
+  export_markdown: false,
+});
 
   // Keep a reference to currentJob that won't cause effect hook to re-run
   const currentJobRef = useRef(null);

@@ -1,34 +1,46 @@
 ```json
 {
-  "vulnerabilities": [{
-      "vulnerability_type": "reentrancy",
+  "vulnerabilities": [
+    {
+      "vulnerability_type": "ACCESS_CONTROL",
       "confidence_score": 1.0,
-      "reasoning": "The contract suffers from a reentrancy vulnerability due to an external ETH transfer following a state variable update. This can be exploited by calling the `withdraw` function from a malicious contract that implements a fallback function calling `withdraw` again before funds are transferred.",
-      "affected_functions": ["withdraw"],
-      "impact": "Funds will not be transferred and balances will be incorrectly reduced, leading to unauthorized withdrawal of user funds.",
-      "exploitation_scenario": "1. The attacker creates a malicious contract with a fallback function.
-2. They call the `withdraw` function from this malicious contract.
-3. Inside `withdraw`, an external ETH transfer is attempted, which will invoke the malicious contract's fallback function.
-4. In the fallback function, the attack re-invokes the `withdraw` function of the vulnerable contract.
-5. The state variable is updated (balance reduced) before the funds are transferred, allowing repeated withdrawals."
-  }, {
-      "vulnerability_type": "unchecked_low_level_calls",
+      "reasoning": "The contract lacks proper access control for the 'setOwner' function, which can be exploited by anyone to change the owner address.",
+      "affected_functions": ["setOwner(address)"],
+      "impact": "If exploited, an attacker could take full control of the contract and potentially manipulate its behavior or steal funds.",
+      "exploitation_scenario": "An attacker sends a transaction to call 'setOwner' with their own address. The new owner can then change the contract's state as needed without any restrictions."
+    },
+    {
+      "vulnerability_type": "TIMESTAMP",
       "confidence_score": 1.0,
-      "reasoning": "The contract does not check whether the external ETH transfer was successful or not. If the transfer fails, the balance reduction will occur regardless of the actual transfer result, leading to state inconsistency.",
-      "affected_functions": ["withdraw"],
-      "impact": "Even if the withdrawal is partially successful (partial funds transferred), the user's balance will be incorrectly reduced leading to potential loss of funds.",
-      "exploitation_scenario": "1. A malicious actor tries to drain the contract by calling `withdraw` with a large amount.
-2. The transfer call fails due to insufficient ETH balance or any other reason, but because there is no check for the call status (success or failure), the state variable (`balance`) will still be reduced."
-  }, {
-      "vulnerability_type": "business_logic",
+      "reasoning": "The contract uses block.timestamp for voting, which could be manipulated by miners to extend or manipulate the duration of the voting period.",
+      "affected_functions": ["vote(uint256)"],
+      "impact": "If exploited, an attacker could front-run voters' transactions and manipulate the outcome of the voting process.",
+      "exploitation_scenario": "Miners maliciously manipulate block timestamps by slightly delaying the mining of votes to give themselves an unfair advantage."
+    },
+    {
+      "vulnerability_type": "REENTRANCY",
+      "confidence_score": 0.5,
+      "reasoning": "There are no reentrancy guards present in the contract, which could be exploited if there are any fallback or external functions to call during vote or proposal adding.",
+      "affected_functions": ["vote(uint256)"],
+      "impact": "If triggered, attackers could exploit reentrancy to withdraw funds repeatedly without voting or paying for proposals, leading to a denial of service.",
+      "exploitation_scenario": "An attacker deploys a contract that calls 'vote' or 'addProposal' in its fallback function. If the contract is vulnerable to reentrancy, it could call itself multiple times and perform unauthorized actions."
+    },
+    {
+      "vulnerability_type": "BUSINESS_LOGIC",
+      "confidence_score": 1.0,
+      "reasoning": "The voting mechanism lacks any mechanism to handle abstentions. If no voting occurs, the contract could potentially return an invalid or unpredictable result.",
+      "affected_functions": ["winningProposal()"],
+      "impact": "If no votes are cast and 'winningProposal' is called, it may return a proposal with 0 votes as the winner, which can be exploited by malicious actors to manipulate results.",
+      "exploitation_scenario": "The only two proposals always receive the same number of votes. As result, the contract will incorrectly identify one of those as a winning proposal based on lexical sorting."
+    },
+    {
+      "vulnerability_type": "NO_SLIPPAGE_LIMIT_CHECK",
       "confidence_score": 0.7,
-      "reasoning": "The contract does not implement any mechanism to prevent front-running attacks. The balance is updated before the transfer, allowing an attacker to exploit the predictable transaction ordering (higher gas values are mined first).",
-      "affected_functions": ["withdraw"],
-      "impact": "Funds will be partially transferred and user balances will remain low if another transaction with higher gas value is confirmed after the front-running attempt.",
-      "exploitation_scenario": "1. User A calls `withdraw` in high gas price.
-2. In parallel, an attacker attempts to withdraw funds before the actual withdrawal (front_running) by submitting a transaction in a lower gas price.
-3. The miner includes the attack transaction first due to higher gas value.
-4. Attackers withdraw funds but user A's balance is not fully refunded, leading to loss of funds."
-  }]
+      "reasoning": "The voting mechanism does not implement a slippage limit or minimum value check, which could be exploited by attackers attempting to manipulate the outcome of the vote.",
+      "affected_functions": ["vote(uint256)"],
+      "impact": "If exploited, an attacker could create multiple accounts and cast votes in an attempt to manipulate the result of the vote in their favor.",
+      "exploitation_scenario": "An attacker creates many accounts and casts votes for their preferred proposal, increasing the likelihood of that proposal being selected as the winning one."
+    }
+  ]
 }
 ```

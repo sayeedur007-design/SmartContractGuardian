@@ -26,7 +26,7 @@ class ProjectContextLLMAgent:
         from ..config import ModelConfig
         
         self.model_config = model_config or ModelConfig()
-        self.model_name = self.model_config.get_model("project_context") if hasattr(self.model_config, "get_model") else "gpt-4o"
+        self.model_name = self.model_config.get_model("context")
         
         # Get provider info for the selected model
         if hasattr(self.model_config, "get_provider_info"):

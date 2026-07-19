@@ -20,99 +20,17 @@ const AnalysisOptions = ({
 
       <div className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Context Model
-          </label>
-          <select
-            name="context_model"
-            value={options.context_model}
-            onChange={handleChange}
-            className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-            disabled={isAnalyzing}
-          >
-            <option value="o3-mini">OpenAI O3 Mini</option>
-            <option value="o1-mini">OpenAI O1 Mini</option>
-            <option value="gpt-4o">GPT-4o</option>
-            <option value="claude-3-5-haiku-latest">Claude 3.5 Haiku</option>
-            <option value="claude-3-7-sonnet-latest">Claude 3.7 Sonnet</option>
-          </select>
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Analyzer Model
-          </label>
-          <select
-            name="analyzer_model"
-            value={options.analyzer_model}
-            onChange={handleChange}
-            className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-            disabled={isAnalyzing}
-          >
-            <option value="o3-mini">OpenAI O3 Mini</option>
-            <option value="o1-mini">OpenAI O1 Mini</option>
-            <option value="gpt-4o">GPT-4o</option>
-            <option value="claude-3-5-haiku-latest">Claude 3.5 Haiku</option>
-            <option value="claude-3-7-sonnet-latest">Claude 3.7 Sonnet</option>
-          </select>
-        </div>
+          <div>
+  <label className="block text-sm font-medium text-gray-700 mb-1">
+    AI Model
+  </label>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Skeptic Model
-          </label>
-          <select
-            name="skeptic_model"
-            value={options.skeptic_model}
-            onChange={handleChange}
-            className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-            disabled={isAnalyzing}
-          >
-            <option value="o3-mini">OpenAI O3 Mini</option>
-            <option value="o1-mini">OpenAI O1 Mini</option>
-            <option value="gpt-4o">GPT-4o</option>
-            <option value="claude-3-5-haiku-latest">Claude 3.5 Haiku</option>
-            <option value="claude-3-7-sonnet-latest">Claude 3.7 Sonnet</option>
-          </select>
+  <div className="block w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-gray-700">
+    Ollama Qwen 7B (Local)
+  
+</div>
         </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Exploiter Model
-          </label>
-          <select
-            name="exploiter_model"
-            value={options.exploiter_model}
-            onChange={handleChange}
-            className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-            disabled={isAnalyzing}
-          >
-            <option value="o3-mini">OpenAI O3 Mini</option>
-            <option value="o1-mini">OpenAI O1 Mini</option>
-            <option value="gpt-4o">GPT-4o</option>
-            <option value="claude-3-5-haiku-latest">Claude 3.5 Haiku</option>
-            <option value="claude-3-7-sonnet-latest">Claude 3.7 Sonnet</option>
-          </select>
-        </div>
-
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Generator Model
-          </label>
-          <select
-            name="generator_model"
-            value={options.generator_model}
-            onChange={handleChange}
-            className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-            disabled={isAnalyzing}
-          >
-            <option value="o3-mini">OpenAI O3 Mini</option>
-            <option value="o1-mini">OpenAI O1 Mini</option>
-            <option value="gpt-4o">GPT-4o</option>
-            <option value="claude-3-5-haiku-latest">Claude 3.5 Haiku</option>
-            <option value="claude-3-7-sonnet-latest">Claude 3.7 Sonnet</option>
-          </select>
-        </div>
-
+        
         <div className="flex items-center">
           <input
             id="auto_run"

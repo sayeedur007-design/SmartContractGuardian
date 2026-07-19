@@ -3,38 +3,20 @@
 # ==============================
 import os
 import json
-import pinecone
 from dotenv import load_dotenv
 from pathlib import Path
 
 from langchain.docstore.document import Document
-from langchain_openai import OpenAIEmbeddings
 from langchain.text_splitter import TokenTextSplitter
-from langchain_community.vectorstores import Pinecone
+from langchain_chroma import Chroma
+from langchain_ollama import OllamaEmbeddings
 
 from utils.print_utils import create_progress_bar, print_step
 
 load_dotenv()
 
 
-def init_pinecone_index(index_name: str = "auditme"):
-    """
-    Initialize Pinecone, create index if it doesn't exist.
-    By default, uses environment variables:
-      - PINECONE_API_KEY
-      - PINECONE_ENV
-    """
-    pc = pinecone.Pinecone(
-        api_key=os.getenv("PINECONE_API_KEY"), environment=os.getenv("PINECONE_ENV")
-    )
 
-    if index_name not in pc.list_indexes().names():
-        pc.create_index(
-            name=index_name,
-            metric="cosine",
-            dimension=1536,
-            spec=pinecone.ServerlessSpec(cloud="aws", region="us-east-1"),
-        )
 
 
 def load_json_vulns(json_path: str) -> list:
@@ -127,12 +109,10 @@ def chunk_contract_with_metadata(
             "filename": filename,
             "pragma": pragma,
             "source": source,
-            "start_line": str(start_line),  # Convert to string
-            "end_line": str(end_line),  # Convert to string
-            "vuln_lines": [
-                str(line) for line in chunk_vuln_lines
-            ],  # Convert each line number to string
-            "vuln_categories": list(chunk_vuln_cats),  # Categories are already strings
+            "start_line": start_line,
+            "end_line": end_line,
+            "vuln_lines": ",".join(map(str, chunk_vuln_lines)),
+            "vuln_categories": ",".join(sorted(chunk_vuln_cats)),
         }
 
         doc = Document(page_content=cleaned_text, metadata=metadata)
@@ -140,92 +120,122 @@ def chunk_contract_with_metadata(
 
     return documents
 
-
-def build_pinecone_vectorstore_from_json(
-    json_path: str, base_dataset_dir: str, index_name: str = "auditme"
+def build_chroma_vectorstore_from_json(
+    json_path: str,
+    base_dataset_dir: str,
+    persist_directory: str = "./chroma_db",
 ):
     """
-    1) Parse the JSON describing vulnerabilities
-    2) For each contract, read its .sol file from disk
-    3) Chunk it + attach vulnerability metadata
-    4) Build the Pinecone index with these Documents (only if the index is empty)
-    5) Return the VectorStore
+    Builds a local Chroma vector database from the vulnerability dataset.
+    If the database already exists, it is reused.
     """
-    # Ensure Pinecone index is set up
-    print_step("Initializing Pinecone...")
-    init_pinecone_index(index_name=index_name)
 
-    # Initialize Pinecone client
-    pc = pinecone.Pinecone(
-        api_key=os.getenv("PINECONE_API_KEY"), environment=os.getenv("PINECONE_ENV")
+    print_step("Initializing Local ChromaDB...")
+
+    embeddings = OllamaEmbeddings(
+        model="nomic-embed-text"
     )
-    index = pc.Index(index_name)
 
-    # Check if the index is empty
-    index_stats = index.describe_index_stats()
-    if index_stats["total_vector_count"] > 0:
-        print("Index already contains data. Skipping document upload.")
-        return Pinecone.from_existing_index(
-            index_name=index_name,
-            embedding=OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY")),
-        )
+    vectorstore = Chroma(
+        persist_directory=persist_directory,
+        embedding_function=embeddings,
+    )
 
-    # If the index is empty, proceed with document upload
+    try:
+        existing = vectorstore.get()
+
+        if existing and len(existing["ids"]) > 0:
+            print_step(
+                f"Loaded existing Chroma database with {len(existing['ids'])} vectors."
+            )
+            return vectorstore
+
+    except Exception:
+        pass
+
     vuln_data = load_json_vulns(json_path)
+
     all_docs = []
 
     with create_progress_bar("Processing contracts") as progress:
-        task = progress.add_task("Processing...", total=len(vuln_data))
+
+        task = progress.add_task(
+            "Processing...",
+            total=len(vuln_data),
+        )
 
         for cdata in vuln_data:
-            full_path = os.path.join(base_dataset_dir, cdata["path"])
+
+            full_path = os.path.join(
+                base_dataset_dir,
+                cdata["path"],
+            )
+
             if not os.path.isfile(full_path):
-                print(f"Warning: File not found: {full_path}. Skipping.")
+                print(f"Warning: File not found: {full_path}")
+                progress.update(task, advance=1)
                 continue
 
-            # Load the entire .sol contract
             with open(full_path, "r", encoding="utf-8") as f:
-                sol_code = f.read()
+                source = f.read()
 
-            # Build a line->categories map
-            line_vulns_map = {}
-            for vuln_item in cdata.get("vulnerabilities", []):
-                cat = vuln_item["category"]
-                for ln in vuln_item["lines"]:
-                    line_vulns_map.setdefault(ln, []).append(cat)
+            line_vulns = {}
 
-            # Create chunked Documents
-            doc_list = chunk_contract_with_metadata(
-                sol_code,
-                line_vulns_map,
+            for vuln in cdata.get("vulnerabilities", []):
+
+                category = vuln["category"]
+
+                for line in vuln["lines"]:
+                    line_vulns.setdefault(line, []).append(category)
+
+            docs = chunk_contract_with_metadata(
+                source,
+                line_vulns,
                 filename=cdata.get("name", ""),
                 pragma=cdata.get("pragma", ""),
                 source=cdata.get("source", ""),
             )
 
-            all_docs.extend(doc_list)
+            all_docs.extend(docs)
+
             progress.update(task, advance=1)
 
-    print(f"Total chunked documents: {len(all_docs)}")
-    print_step(f"Uploading {len(all_docs)} documents to Pinecone...")
+    print_step(f"Embedding {len(all_docs)} chunks...")
 
-    # Create embeddings
-    embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
+# Ensure metadata contains only Chroma-supported types
+    for doc in all_docs:
+        cleaned_metadata = {}
+        for key, value in doc.metadata.items():
+            if isinstance(value, list):
+                cleaned_metadata[key] = ",".join(map(str, value))
+            elif isinstance(value, dict):
+                cleaned_metadata[key] = json.dumps(value)
+            else:
+                cleaned_metadata[key] = value
+        doc.metadata = cleaned_metadata
 
-    # Upload documents to the index
-    vectorstore = Pinecone.from_documents(all_docs, embeddings, index_name=index_name)
+    vectorstore.add_documents(all_docs)
+
+    print_step("Local ChromaDB created successfully.")
+
     return vectorstore
 
 
 def get_vuln_retriever_from_json(
-    json_path: str, base_dataset_dir: str, index_name: str = "auditme", top_k: int = 5
+    json_path: str,
+    base_dataset_dir: str,
+    persist_directory: str = "./chroma_db",
+    top_k: int = 5,
 ):
-    """
-    Builds (or updates) the Pinecone index from your JSON-based vulnerability data,
-    and returns a retriever for that index.
-    """
-    vectorstore = build_pinecone_vectorstore_from_json(
-        json_path=json_path, base_dataset_dir=base_dataset_dir, index_name=index_name
+
+    vectorstore = build_chroma_vectorstore_from_json(
+        json_path=json_path,
+        base_dataset_dir=base_dataset_dir,
+        persist_directory=persist_directory,
     )
-    retriever = vectorstore.as_retriever(search_kwargs={"k": top_k})
-    return retriever
+
+    return vectorstore.as_retriever(
+        search_kwargs={
+            "k": top_k
+        }
+    )
