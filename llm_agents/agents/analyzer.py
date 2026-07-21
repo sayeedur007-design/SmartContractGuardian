@@ -312,33 +312,11 @@ Format findings as:
     
 
     def _parse_llm_response(self, response_text: str):
-        import json
-        import re
+        from utils.json_cleaner import parse_json_safely
 
-        # Try direct JSON
-        try:
-            data = json.loads(response_text)
-            return data.get("vulnerabilities", [])
-        except Exception:
-            pass
-
-        # Extract markdown JSON block
-        match = re.search(r"```json\s*(.*?)\s*```", response_text, re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group(1))
-                return data.get("vulnerabilities", [])
-            except Exception as e:
-                print(f"Markdown JSON parse failed: {e}")
-
-        # Extract first JSON object
-        match = re.search(r"\{.*\}", response_text, re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-                return data.get("vulnerabilities", [])
-            except Exception as e:
-                print(f"Object JSON parse failed: {e}")
+        data = parse_json_safely(response_text, default_fallback={})
+        if "vulnerabilities" in data:
+            return data["vulnerabilities"]
 
         print("\n========== FAILED RESPONSE ==========")
         print(response_text)

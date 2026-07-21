@@ -310,6 +310,21 @@ def analyze_thread(job_id, contract_path, model_config, auto_run_config, use_rag
             'result': f'Analyzed {function_count} functions'
         })
 
+        # Copy contract to exploit/src/VulnerableContract.sol so that PoC test compilation works
+        try:
+            import shutil
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            exploit_src_dir = os.path.join(root_dir, "exploit", "src")
+            os.makedirs(exploit_src_dir, exist_ok=True)
+            shutil.copy2(contract_path, os.path.join(exploit_src_dir, "VulnerableContract.sol"))
+            
+            exploit_src_src_dir = os.path.join(exploit_src_dir, "src")
+            os.makedirs(exploit_src_src_dir, exist_ok=True)
+            shutil.copy2(contract_path, os.path.join(exploit_src_src_dir, "VulnerableContract.sol"))
+            print(f"Copied contract to {exploit_src_dir}/VulnerableContract.sol for compiler visibility")
+        except Exception as copy_err:
+            print(f"Warning: Could not copy contract to exploit directory: {copy_err}")
+
         # Read contract source (use flattened file for LLM context, or handle multi-file appropriately later)
         with open(contract_path, "r", encoding="utf-8") as f:
             source_code = f.read()

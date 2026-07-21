@@ -43,62 +43,107 @@ class ExploitRunner:
         Returns:
             Dictionary with execution results and fixed code if applicable
         """
-        with create_progress_spinner("Running exploit test") as progress:
-            task = progress.add_task("Executing test...")
+        import shutil
 
-            # Get file path and execution command
-            exploit_file = poc_data.get("exploit_file")
-            execution_command = poc_data.get("execution_command")
+        # Get file path and execution command
+        exploit_file = poc_data.get("exploit_file")
+        execution_command = poc_data.get("execution_command")
 
-            if not exploit_file or not os.path.exists(exploit_file):
-                progress.update(task, description="Error: Exploit file not found")
-                return {"success": False, "error": "Exploit file not found", "output": ""}
+        if not exploit_file or not os.path.exists(exploit_file):
+            return {"success": False, "error": "Exploit file not found", "output": ""}
 
-            # Initialize results
-            success = False
-            output = ""
-            error_message = ""
-            retry_count = 0
-            fixed_code = None
+        # Isolate the current PoC file to prevent compilation errors from other files
+        test_dir = os.path.join("exploit", "src", "test")
+        backup_dir = os.path.join("exploit", "src", "test_backup")
+        os.makedirs(backup_dir, exist_ok=True)
+        
+        current_filename = os.path.basename(exploit_file)
+        moved_files = []
 
-            # Keep trying until success or max retries reached
-            while not success and retry_count < self.max_retries:
-                if retry_count > 0:
-                    progress.update(task, description=f"Retry #{retry_count}: Running test again...")
+        try:
+            # Move all other PoC files to the backup directory
+            if os.path.exists(test_dir):
+                for f in os.listdir(test_dir):
+                    if f.startswith("PoC_") and f.endswith(".sol") and f != current_filename:
+                        src_path = os.path.join(test_dir, f)
+                        dst_path = os.path.join(backup_dir, f)
+                        try:
+                            shutil.move(src_path, dst_path)
+                            moved_files.append((dst_path, src_path))
+                        except Exception as move_err:
+                            print_warning(f"Could not temporarily move {f}: {move_err}")
 
-                # Run the test
-                success, output, error_message = self._execute_test(execution_command)
+            with create_progress_spinner("Running exploit test") as progress:
+                task = progress.add_task("Executing test...")
 
-                # If test failed, try to fix it
-                if not success:
-                    progress.update(task, description=f"Test failed. Attempting to fix code (try {retry_count + 1}/{self.max_retries})...")
-                    fixed_code = self._fix_test_code(exploit_file, output, error_message)
+                # Initialize results
+                success = False
+                output = ""
+                error_message = ""
+                retry_count = 0
+                fixed_code = None
 
-                    if fixed_code:
-                        # Save the fixed code
-                        with open(exploit_file, 'w') as f:
-                            f.write(fixed_code)
-                        progress.update(task, description="Fixed code saved. Running test again...")
-                    else:
-                        progress.update(task, description="Could not fix code. Moving to next retry...")
+                # Keep trying until success or max retries reached
+                while not success and retry_count < self.max_retries:
+                    if retry_count > 0:
+                        progress.update(task, description=f"Retry #{retry_count}: Running test again...")
 
-                retry_count += 1
+                    # Run the test
+                    success, output, error_message = self._execute_test(execution_command)
 
-            # Update progress based on final result
-            if success:
-                progress.update(task, description="Test executed successfully!", completed=True)
-            else:
-                progress.update(task, description="Test failed after all retries", completed=True)
+                    # If test failed, try to fix it
+                    if not success:
+                        progress.update(task, description=f"Test failed. Attempting to fix code (try {retry_count + 1}/{self.max_retries})...")
+                        fixed_code = self._fix_test_code(exploit_file, output, error_message)
 
-            # Return results
-            return {
-                "success": success,
-                "output": output,
-                "error": error_message if not success else "",
-                "fixed_code": fixed_code if fixed_code and not success else None,
-                "file_path": exploit_file,
-                "retries": retry_count - 1  # Actual retries (-1 because first attempt isn't a retry)
-            }
+                        if fixed_code:
+                            # Clean up markdown code blocks if the fix response has them
+                            if fixed_code.startswith("```") and fixed_code.endswith("```"):
+                                match = re.search(r"```(?:solidity)?\s*([\s\S]*?)\s*```", fixed_code)
+                                if match:
+                                    fixed_code = match.group(1).strip()
+                            elif "```" in fixed_code:
+                                match = re.search(r"```(?:solidity)?\s*([\s\S]*?)\s*```", fixed_code)
+                                if match:
+                                    fixed_code = match.group(1).strip()
+
+                            # Save the fixed code
+                            with open(exploit_file, 'w', encoding='utf-8') as f:
+                                f.write(fixed_code)
+                            progress.update(task, description="Fixed code saved. Running test again...")
+                        else:
+                            progress.update(task, description="Could not fix code. Moving to next retry...")
+
+                    retry_count += 1
+
+                # Update progress based on final result
+                if success:
+                    progress.update(task, description="Test executed successfully!", completed=True)
+                else:
+                    progress.update(task, description="Test failed after all retries", completed=True)
+
+        finally:
+            # Restore all moved files
+            for dst_path, src_path in moved_files:
+                if os.path.exists(dst_path):
+                    try:
+                        shutil.move(dst_path, src_path)
+                    except Exception as restore_err:
+                        # If destination already exists, just remove backup
+                        if os.path.exists(src_path):
+                            os.remove(dst_path)
+                        else:
+                            print_warning(f"Could not restore {os.path.basename(src_path)}: {restore_err}")
+
+        # Return results
+        return {
+            "success": success,
+            "output": output,
+            "error": error_message if not success else "",
+            "fixed_code": fixed_code if fixed_code and not success else None,
+            "file_path": exploit_file,
+            "retries": retry_count - 1  # Actual retries (-1 because first attempt isn't a retry)
+        }
 
     def _execute_test(self, command: str) -> Tuple[bool, str, str]:
         """

@@ -3,7 +3,7 @@
 # ==============================
 import os
 from typing import Dict
-
+from pathlib import Path
 # Import the new function
 from rag.doc_db import get_vuln_retriever_from_json
 
@@ -32,13 +32,16 @@ class AgentCoordinator:
         self.use_rag = use_rag
 
         # Initialize retriever only if RAG is enabled
+        # Initialize retriever only if RAG is enabled
         if self.use_rag:
+            PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
             self.vuln_retriever = get_vuln_retriever_from_json(
-            json_path="known_vulnerabilities/contract_vulns.json",
-            base_dataset_dir="known_vulnerabilities",
-            persist_directory="./chroma_db",
-            top_k=3,
-)
+                json_path=str(PROJECT_ROOT / "known_vulnerabilities" / "contract_vulns.json"),
+                base_dataset_dir=str(PROJECT_ROOT / "known_vulnerabilities"),
+                persist_directory=str(PROJECT_ROOT / "chroma_db"),
+                top_k=3,
+    )
         else:
             self.vuln_retriever = None
 

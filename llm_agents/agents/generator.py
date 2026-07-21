@@ -100,11 +100,13 @@ Validation Steps:
 
 IMPORTANT FOUNDRY TEST REQUIREMENTS:
 1. Import basetest.sol from the current directory: `import "./basetest.sol";`
-2. Your contract must extend BaseTestWithBalanceLog: `contract YourTest is BaseTestWithBalanceLog`
-3. In the setUp() function, ensure the test contract has enough ETH: `vm.deal(address(this), 100 ether);`
-4. Use the balanceLog modifier on your test function: `function testExploit() public balanceLog`
-5. In the testExploit function, ensure the test address/contract has enough ETH: `vm.deal(address(this), 10 ether);`
-6. Check return values from all external calls and handle errors properly
+2. Import the contract under analysis using the relative path: `import "../VulnerableContract.sol";` (DO NOT import from any other path, and DO NOT use `@openzeppelin` or other external libraries).
+3. Your contract must extend BaseTestWithBalanceLog: `contract YourTest is BaseTestWithBalanceLog`
+4. In the setUp() function, ensure the test contract has enough ETH: `vm.deal(address(this), 100 ether);`
+5. Use the balanceLog modifier on your test function: `function testExploit() public balanceLog`
+6. In the testExploit function, ensure the test address/contract has enough ETH: `vm.deal(address(this), 10 ether);`
+7. Check return values from all external calls and handle errors properly
+8. Define any required helper contracts or interfaces (like custom ERC20s, mock attackers) inline within the test file.
 
 The educational test contract should:
 1. Be a complete, compilable Solidity file using Foundry's Test framework
@@ -160,7 +162,14 @@ Return only the complete Solidity code with no additional explanations.
             )
 
         # Extract the code from the response
-        response_text = resp.choices[0].message.content
+        response_text = resp.choices[0].message.content.strip()
+
+        # Clean up the response if it has markdown code blocks
+        import re
+        if "```" in response_text:
+            match = re.search(r"```(?:solidity)?\s*([\s\S]*?)\s*```", response_text)
+            if match:
+                response_text = match.group(1).strip()
 
         # Ensure we have a valid contract by doing some basic checks
         if "contract" not in response_text or "function test" not in response_text:

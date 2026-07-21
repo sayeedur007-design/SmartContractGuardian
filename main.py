@@ -181,6 +181,17 @@ def main():
         print_error(f"Contract file not found: {filepath}")
         return
 
+    # Copy the contract file to the exploit directory for compilability of generated PoCs
+    try:
+        import shutil
+        os.makedirs("exploit/src", exist_ok=True)
+        shutil.copy2(filepath, "exploit/src/VulnerableContract.sol")
+        os.makedirs("exploit/src/src", exist_ok=True)
+        shutil.copy2(filepath, "exploit/src/src/VulnerableContract.sol")
+        print_step("Copied contract to exploit/src/VulnerableContract.sol for compiler visibility")
+    except Exception as copy_err:
+        print_warning(f"Could not copy contract to exploit directory: {copy_err}")
+
     # --- REMOVED log_code_analysis call from here ---
 
     # Start static analysis stage

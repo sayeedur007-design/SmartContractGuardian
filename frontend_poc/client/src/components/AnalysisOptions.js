@@ -20,15 +20,39 @@ const AnalysisOptions = ({
 
       <div className="space-y-4">
         <div>
-          <div>
-  <label className="block text-sm font-medium text-gray-700 mb-1">
-    AI Model
-  </label>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Analyzer Model
+          </label>
+          <div className="block w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-gray-700">
+            Ollama(Local)
+          </div>
+        </div>
 
-  <div className="block w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-gray-700">
-    Ollama Qwen 7B (Local)
-  
-</div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Skeptic Model
+          </label>
+          <div className="block w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-gray-700">
+            Ollama(Local)
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Exploiter Model
+          </label>
+          <div className="block w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-gray-700">
+            Ollama(Local)
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Generator Model
+          </label>
+          <div className="block w-full rounded-md border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-gray-700">
+            Ollama(Local)
+          </div>
         </div>
         
         <div className="flex items-center">

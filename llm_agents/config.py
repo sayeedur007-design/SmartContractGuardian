@@ -16,11 +16,11 @@ class ModelConfig:
         skip_poc_generation: bool = False,
         export_markdown: bool = False,
     ):
-        self.analyzer_model = analyzer_model
-        self.skeptic_model = skeptic_model
-        self.exploiter_model = exploiter_model
-        self.generator_model = generator_model
-        self.context_model = context_model
+        self.analyzer_model = "qwen2.5-coder:7b" if analyzer_model == "ollama" else analyzer_model
+        self.skeptic_model = "qwen2.5-coder:7b" if skeptic_model == "ollama" else skeptic_model
+        self.exploiter_model = "qwen2.5-coder:7b" if exploiter_model == "ollama" else exploiter_model
+        self.generator_model = "qwen2.5-coder:7b" if generator_model == "ollama" else generator_model
+        self.context_model = "qwen2.5-coder:7b" if context_model == "ollama" else context_model
         self.base_url = base_url
         self.skip_poc_generation = skip_poc_generation
         self.export_markdown = export_markdown

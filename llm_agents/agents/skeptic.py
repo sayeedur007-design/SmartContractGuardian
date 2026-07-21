@@ -146,14 +146,9 @@ class SkepticAgent:
         return sorted(vulnerabilities, key=lambda x: x.get("skeptic_confidence", 0), reverse=True)
 
     def _parse_response(self, text_out: str) -> list:
-        try:
-            data = json.loads(text_out)
-            return data.get("rechecked_vulnerabilities", [])
-        except json.JSONDecodeError:
-            # Try extracting JSON from markdown code block
-            if match := re.search(r"```(?:json)?(.*?)```", text_out, re.DOTALL):
-                try:
-                    return json.loads(match.group(1).strip()).get("rechecked_vulnerabilities", [])
-                except:
-                    print_warning("Failed to parse JSON from code block")
-            return []
+        from utils.json_cleaner import parse_json_safely
+
+        data = parse_json_safely(text_out, default_fallback={})
+        if "rechecked_vulnerabilities" in data:
+            return data["rechecked_vulnerabilities"]
+        return []

@@ -687,3 +687,4 @@ The system tracks token usage and performance metrics for each run:
 1. Check `performance_metrics_<timestamp>.json` files
 2. Review token usage by agent to optimize model selection
 3. Monitor execution time by stage to identify bottlenecks
+
