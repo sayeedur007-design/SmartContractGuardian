@@ -216,8 +216,15 @@ class PerformanceTracker:
         Returns:
             Path where the file was saved
         """
+        import os
         if filepath is None:
-            filepath = f"performance_metrics_{self.run_timestamp}.json"
+            dir_path = "performance_analysis"
+            os.makedirs(dir_path, exist_ok=True)
+            filepath = os.path.join(dir_path, f"performance_metrics_{self.run_timestamp}.json")
+        else:
+            dir_name = os.path.dirname(filepath)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
         
         with open(filepath, 'w') as f:
             json.dump(self.get_performance_summary(), f, indent=2)

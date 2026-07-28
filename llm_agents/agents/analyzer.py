@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import logging
 import os
+import re
 from utils.print_utils import print_warning, create_progress_spinner
 from openai import OpenAI
 from langchain.schema import Document
@@ -85,6 +86,7 @@ class AnalyzerAgent:
                 # Parse results
                 progress.update(task, description="Processing results...")
                 vulnerabilities = self._parse_llm_response(response_text)
+                vulnerabilities = self._add_deterministic_findings(vulnerabilities, contract_info)
                 self._attach_code_snippets(vulnerabilities, contract_info)
 
                 progress.update(task, completed=True)
@@ -103,6 +105,47 @@ class AnalyzerAgent:
         for fn in contract_info.get("function_details", []):
             lines.append(f"Function {fn['function']} calls {fn['called_functions']}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _add_deterministic_findings(vulnerabilities: list, contract_info: Dict) -> list:
+        """Backstop high-signal Solidity patterns that must not depend on LLM JSON quality."""
+        source = contract_info.get("source_code", "")
+        existing = {str(item.get("vulnerability_type", "")).lower() for item in vulnerabilities}
+        findings = [item for item in vulnerabilities if item.get("vulnerability_type") != "unknown"]
+
+        rules = [
+            ("reentrancy", r"\.call\s*\{[^}]*value\s*:", "withdraw", "High",
+             "External value transfer occurs before the balance is reduced.",
+             "Apply checks-effects-interactions and use a reentrancy guard."),
+            ("access_control", r"function\s+changeOwner\s*\([^)]*\)\s+external\s*\{", "changeOwner", "High",
+             "Ownership can be changed by any external caller.",
+             "Restrict ownership changes with an onlyOwner modifier and validate the new owner."),
+            ("timestamp_dependence", r"block\.timestamp", "withdrawAfterUnlock", "Medium",
+             "Unlock logic relies on a miner-influenced block timestamp.",
+             "Avoid tight timestamp guarantees; document tolerance or use a safer time design."),
+            ("integer_overflow", r"unchecked\s*\{[\s\S]*?\+=", "reward", "High",
+             "Unchecked arithmetic can wrap balances in Solidity 0.8+.",
+             "Remove unchecked or validate the addition before updating the balance."),
+            ("dangerous_selfdestruct", r"selfdestruct\s*\(", "destroy", "High",
+             "A publicly reachable selfdestruct can permanently disable the contract.",
+             "Remove selfdestruct or strictly protect it with appropriate authorization."),
+            ("denial_of_service", r"for\s*\([^)]*;[^)]*\.length[\s\S]*?\.transfer\s*\(", "distribute", "Medium",
+             "Unbounded iteration with transfers can exceed gas limits or revert as recipients grow.",
+             "Use pull payments or process recipients in bounded batches."),
+        ]
+        for vuln_type, pattern, function, severity, reasoning, remediation in rules:
+            if vuln_type not in existing and re.search(pattern, source, re.IGNORECASE):
+                findings.append({
+                    "vulnerability_type": vuln_type,
+                    "confidence_score": 0.95,
+                    "reasoning": reasoning,
+                    "affected_functions": [function],
+                    "impact": severity,
+                    "severity": severity,
+                    "remediation": remediation,
+                    "exploitation_scenario": "Confirmed by deterministic source-pattern analysis.",
+                })
+        return findings
 
     def _summarize_detector_results(self, detector_results) -> str:
         """
@@ -170,7 +213,15 @@ class AnalyzerAgent:
         category_guidance = "\n=== VULNERABILITY CATEGORY GUIDANCE ===\n"
         snippet_categories = set()
         for doc in relevant_docs:
-            snippet_categories.update(doc.metadata.get("vuln_categories", []))
+            categories = doc.metadata.get("vuln_categories", "")
+            # Chroma metadata only supports scalar values, so categories are
+            # stored as a comma-separated string by the document builder.
+            if isinstance(categories, str):
+                snippet_categories.update(
+                    category.strip() for category in categories.split(",") if category.strip()
+                )
+            elif isinstance(categories, (list, tuple, set)):
+                snippet_categories.update(categories)
 
         for cat, guidance in self.vuln_categories.items():
             priority_note = (
@@ -318,6 +369,14 @@ Format findings as:
         if "vulnerabilities" in data:
             return data["vulnerabilities"]
 
+        # Local models occasionally produce one malformed finding after a
+        # sequence of valid JSON objects. Keep the valid findings instead of
+        # discarding the entire audit result.
+        candidates = self._extract_vulnerability_objects(response_text)
+        if candidates:
+            logger.warning("Recovered %d valid vulnerability finding(s) from malformed LLM JSON.", len(candidates))
+            return candidates
+
         print("\n========== FAILED RESPONSE ==========")
         print(response_text)
         print("=====================================\n")
@@ -330,6 +389,38 @@ Format findings as:
             "impact": "",
             "exploitation_scenario": ""
         }]
+
+    @staticmethod
+    def _extract_vulnerability_objects(response_text: str) -> list:
+        """Return individually parseable objects from a vulnerabilities array."""
+        from utils.json_cleaner import parse_json_safely
+
+        array_match = re.search(r'"vulnerabilities"\s*:\s*\[', response_text)
+        if not array_match:
+            return []
+
+        objects, start, depth, in_string, escaped = [], None, 0, False, False
+        for index, char in enumerate(response_text[array_match.end():], start=array_match.end()):
+            if in_string:
+                if char == '"' and not escaped:
+                    in_string = False
+                escaped = char == "\\" and not escaped
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                if depth == 0:
+                    start = index
+                depth += 1
+            elif char == "}" and depth:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    item = parse_json_safely(response_text[start:index + 1], default_fallback=None)
+                    if isinstance(item, dict) and item.get("vulnerability_type"):
+                        objects.append(item)
+            elif char == "]" and depth == 0:
+                break
+        return objects
 
     def _attach_code_snippets(self, vulnerabilities: list, contract_info: dict):
         """

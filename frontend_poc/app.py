@@ -23,9 +23,12 @@ from llm_agents.config import ModelConfig
 from llm_agents.agents.runner import ExploitRunner
 from utils.token_tracker import performance_tracker
 
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(APP_DIR)
+
 app = Flask(
     __name__,
-    static_folder=os.path.join(os.path.dirname(__file__), "build"),
+    static_folder=os.path.join(APP_DIR, "client", "build"),
     static_url_path=""
 )
 
@@ -37,7 +40,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 jobs = {}
 
 # Store uploaded contracts
-UPLOAD_FOLDER = 'uploads'
+UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 @app.route('/', defaults={'path': ''})
@@ -434,11 +437,8 @@ def analyze_thread(job_id, contract_path, model_config, auto_run_config, use_rag
 
             # Get metrics as dictionary (now includes accurate LOC)
             metrics = performance_tracker.get_performance_summary()
-
-            # Save metrics to a JSON file for reference
-            metrics_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            metrics_dir = os.path.join(PROJECT_ROOT, "performance_analysis")
             os.makedirs(metrics_dir, exist_ok=True)
-
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             metrics_file = os.path.join(
                 metrics_dir,
@@ -1583,6 +1583,16 @@ class SocketIOAgentCoordinator(AgentCoordinator):
             'filename': os.path.basename(output_file)
         })
 
+def open_browser():
+    import time
+    import webbrowser
+    time.sleep(1.5)
+    print("Opening web interface in browser...")
+    webbrowser.open("http://localhost:3000")
+
 if __name__ == '__main__':
+    import threading
+    threading.Thread(target=open_browser, daemon=True).start()
+    
     # Match the port with your socket in the frontend
     socketio.run(app, debug=True, host='0.0.0.0', port=3000, allow_unsafe_werkzeug=True)

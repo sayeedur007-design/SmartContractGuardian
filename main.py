@@ -4,6 +4,7 @@
 import os
 import json
 import argparse
+from pathlib import Path
 from dotenv import load_dotenv
 from static_analysis.parse_contract import analyze_contract
 from llm_agents.agent_coordinator import AgentCoordinator
@@ -25,7 +26,7 @@ def parse_arguments():
     parser.add_argument("--api-base", help="Base URL for OpenAI API")
 
     # Add contract file option
-    parser.add_argument("--contract", default="static_analysis/test_contracts/sample3.sol",
+    parser.add_argument("--contract", default="VulnerableBank.sol",
                       help="Path to contract file to analyze")
     parser.add_argument("--contract-address",
                       help="Blockchain contract address to fetch and analyze")
@@ -350,6 +351,9 @@ def main():
 
     # Export results if requested
     performance_tracker.start_stage("export")
+    # Always export HTML report to show output in browser
+    export_results_to_html(filepath, results)
+
     if model_config.export_markdown:
         # Use primary filepath for naming consistency
         export_results_to_markdown(filepath, results)
@@ -366,6 +370,659 @@ def main():
     metrics_file = performance_tracker.save_to_file() # Saves the final summary
     performance_tracker.print_summary(include_detailed_breakdowns=True) # Prints the final summary
 
+def export_results_to_html(contract_path, results):
+    """Export analysis results to a beautiful HTML file and open it in the browser"""
+    from datetime import datetime
+    import os
+    import webbrowser
+
+    contract_name = os.path.basename(contract_path)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dir_path = "reports"
+    os.makedirs(dir_path, exist_ok=True)
+    output_file = os.path.join(dir_path, f"analysis_report_{contract_name}_{timestamp}.html")
+
+    rechecked_vulns = results.get("rechecked_vulnerabilities", [])
+    pocs = results.get("generated_pocs", [])
+
+    # Calculate statistics
+    total_vulns = len(rechecked_vulns)
+    try:
+        high_confidence_vulns = sum(1 for v in rechecked_vulns if float(v.get('skeptic_confidence', 0)) > 0.7)
+    except (ValueError, TypeError):
+        high_confidence_vulns = 0
+    total_pocs = len(pocs)
+    successful_pocs = 0
+    for p in pocs:
+        if "poc_data" in p and p["poc_data"].get("execution_results", {}).get("success"):
+            successful_pocs += 1
+
+    # Format vulnerabilities list for JS/HTML
+    vulns_html = ""
+    vulns_sidebar_html = ""
+    
+    for idx, vuln in enumerate(rechecked_vulns, start=1):
+        vuln_type = vuln.get('vulnerability_type', 'Unknown')
+        try:
+            confidence = float(vuln.get('skeptic_confidence', 0))
+        except (ValueError, TypeError):
+            confidence = 0.0
+        
+        confidence_class = "conf-high" if confidence > 0.7 else "conf-medium" if confidence > 0.4 else "conf-low"
+        confidence_label = f"{confidence:.2f}"
+        
+        # Sidebar item
+        vulns_sidebar_html += f"""
+        <div class="sidebar-item" onclick="showVulnerability({idx})">
+            <span class="sidebar-title">{vuln_type}</span>
+            <span class="badge {confidence_class}">Conf: {confidence_label}</span>
+        </div>
+        """
+        
+        # Details page
+        reasoning = vuln.get('reasoning', 'N/A').replace('\n', '<br>')
+        validity = vuln.get('validity_reasoning', '').replace('\n', '<br>')
+        code_snippet = vuln.get('code_snippet', '')
+        code_snippet_html = f"<pre><code class='language-solidity'>{code_snippet}</code></pre>" if code_snippet else "<p>No code snippet provided.</p>"
+        
+        affected_funcs = ", ".join(vuln.get('affected_functions', []))
+        
+        # Find matching PoC
+        poc_info_html = "<p class='no-poc'>No Proof of Concept generated.</p>"
+        matching_poc = next((p for p in pocs if p.get("vulnerability", {}).get("vulnerability_type") == vuln_type), None)
+        
+        if matching_poc:
+            plan = matching_poc.get("exploit_plan", {})
+            setup = "".join(f"<li>{s}</li>" for s in plan.get("setup_steps", []))
+            execution = "".join(f"<li>{e}</li>" for e in plan.get("execution_steps", []))
+            validation = "".join(f"<li>{v}</li>" for v in plan.get("validation_steps", []))
+            
+            plan_html = f"""
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                {f"<h5>Setup</h5><ul>{setup}</ul>" if setup else ""}
+                {f"<h5>Execution</h5><ul>{execution}</ul>" if execution else ""}
+                {f"<h5>Validation</h5><ul>{validation}</ul>" if validation else ""}
+            </div>
+            """
+            
+            poc_data = matching_poc.get("poc_data", {})
+            exploit_code = poc_data.get("exploit_code", "")
+            code_html = f"<pre><code class='language-solidity'>{exploit_code}</code></pre>" if exploit_code else ""
+            
+            exec_res = poc_data.get("execution_results", {})
+            success_status = exec_res.get("success")
+            
+            if success_status is True:
+                status_html = "<span class='badge conf-high'>SUCCESS</span>"
+            elif success_status is False:
+                status_html = f"<span class='badge conf-low'>FAILED (Retries: {exec_res.get('retries', 0)})</span>"
+            else:
+                status_html = "<span class='badge conf-medium'>SKIPPED / UNTESTED</span>"
+                
+            error_msg = exec_res.get("error", "")
+            error_html = f"<div class='error-box'><h5>Error Output:</h5><pre><code>{error_msg}</code></pre></div>" if error_msg else ""
+            
+            poc_info_html = f"""
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code>{os.path.basename(poc_data.get('exploit_file', 'N/A'))}</code></p>
+                <p><strong>Status:</strong> {status_html}</p>
+                {error_html}
+                {plan_html}
+                {f"<h5>Exploit Code</h5>{code_html}" if exploit_code else ""}
+            </div>
+            """
+            
+        vulns_html += f"""
+        <div id="vuln-details-{idx}" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>{vuln_type}</h3>
+                <span class="badge {confidence_class}">Confidence: {confidence_label}</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> {affected_funcs or 'None'}</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-{idx}')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-{idx}')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-{idx}" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">{reasoning}</div>
+                        
+                        {f"<h4>Validation Reasoning</h4><div class='reasoning-text'>{validity}</div>" if validity else ""}
+                        
+                        <h4>Code Snippet</h4>
+                        {code_snippet_html}
+                    </div>
+                    
+                    <div id="poc-{idx}" class="detail-tab-content" style="display: none;">
+                        {poc_info_html}
+                    </div>
+                </div>
+            </div>
+        </div>
+        """
+
+    # Recommendation list
+    found_vuln_types = {v.get('vulnerability_type', '').lower() for v in rechecked_vulns}
+    recs_html = ""
+    if any('reentrancy' in vt for vt in found_vuln_types):
+        recs_html += "<li><strong>Reentrancy:</strong> Use checks-effects-interactions pattern, ReentrancyGuard.</li>"
+    if any(term in vt for vt in found_vuln_types for term in ['overflow', 'underflow', 'arithmetic']):
+        recs_html += "<li><strong>Arithmetic:</strong> Use Solidity 0.8+ or SafeMath.</li>"
+    if any(term in vt for vt in found_vuln_types for term in ['access', 'authorization', 'permission']):
+        recs_html += "<li><strong>Access Control:</strong> Use modifiers (e.g. <code>onlyOwner</code>), check roles properly.</li>"
+    if any(term in vt for vt in found_vuln_types for term in ['oracle', 'price']):
+        recs_html += "<li><strong>Oracle Manipulation:</strong> Use TWAP, multiple sources (e.g., Chainlink).</li>"
+    if any('unchecked' in vt for vt in found_vuln_types):
+        recs_html += "<li><strong>Unchecked Returns:</strong> Check return values of external calls.</li>"
+    recs_html += "<li><strong>General:</strong> Conduct thorough testing and consider professional audits.</li>"
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Contract Vulnerability Analysis Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <style>
+        :root {{
+            --bg-main: #0f172a;
+            --bg-card: #1e293b;
+            --bg-accent: #334155;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --primary: #4f46e5;
+            --primary-gradient: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+            --border: #475569;
+            
+            --high-conf: #ef4444;
+            --med-conf: #f59e0b;
+            --low-conf: #10b981;
+        }}
+        
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }}
+        
+        body {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            line-height: 1.6;
+        }}
+        
+        header {{
+            background: var(--primary-gradient);
+            padding: 2rem;
+            color: white;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            margin-bottom: 2rem;
+        }}
+        
+        .header-container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        
+        .header-title h1 {{
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            color: white;
+        }}
+        
+        .header-title p {{
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.9);
+        }}
+        
+        .main-container {{
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+        }}
+        
+        .stats-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2.5rem;
+        }}
+        
+        .stat-card {{
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }}
+        
+        .stat-card:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+        }}
+        
+        .stat-card .stat-label {{
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }}
+        
+        .stat-card .stat-value {{
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }}
+        
+        .stat-card.accent {{
+            border-left: 4px solid var(--primary);
+        }}
+        
+        .report-layout {{
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 2rem;
+            margin-bottom: 3rem;
+            align-items: start;
+        }}
+        
+        .sidebar {{
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }}
+        
+        .sidebar h2 {{
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-main);
+        }}
+        
+        .sidebar-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }}
+        
+        .sidebar-item {{
+            padding: 1rem;
+            background-color: var(--bg-accent);
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: background-color 0.2s, border-color 0.2s;
+            border: 1px solid transparent;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        
+        .sidebar-item:hover {{
+            background-color: #475569;
+        }}
+        
+        .sidebar-item.active {{
+            background-color: var(--primary);
+            border-color: var(--primary);
+        }}
+        
+        .sidebar-title {{
+            font-weight: 500;
+            font-size: 0.9rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 70%;
+        }}
+        
+        .badge {{
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            text-transform: uppercase;
+        }}
+        
+        .conf-high {{ background-color: var(--high-conf); color: white; }}
+        .conf-medium {{ background-color: var(--med-conf); color: black; }}
+        .conf-low {{ background-color: var(--low-conf); color: white; }}
+        
+        .content-panel {{
+            min-height: 500px;
+        }}
+        
+        .vuln-details-card {{
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+            animation: fadeIn 0.3s ease-in-out;
+        }}
+        
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: translateY(5px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
+        }}
+        
+        .details-header {{
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        
+        .details-header h3 {{
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }}
+        
+        .details-body {{
+            padding: 1.5rem;
+        }}
+        
+        .meta-section {{
+            margin-bottom: 1.5rem;
+            font-size: 0.95rem;
+            background-color: var(--bg-accent);
+            padding: 1rem;
+            border-radius: 0.5rem;
+        }}
+        
+        .tabs-container {{
+            margin-top: 1.5rem;
+        }}
+        
+        .tab-buttons {{
+            display: flex;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 1.5rem;
+        }}
+        
+        .tab-btn {{
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            padding: 0.75rem 1.5rem;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: color 0.2s, border-bottom-color 0.2s;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+        }}
+        
+        .tab-btn:hover {{
+            color: var(--text-main);
+        }}
+        
+        .tab-btn.active {{
+            color: var(--text-main);
+            border-bottom: 2px solid var(--primary);
+            font-weight: 600;
+        }}
+        
+        .detail-tab-content h4 {{
+            font-size: 1.1rem;
+            margin: 1.5rem 0 0.75rem;
+            border-bottom: 1px dashed var(--border);
+            padding-bottom: 0.25rem;
+            color: var(--text-main);
+        }}
+        
+        .detail-tab-content h4:first-child {{
+            margin-top: 0;
+        }}
+        
+        .reasoning-text {{
+            font-size: 0.95rem;
+            color: #cbd5e1;
+            margin-bottom: 1.5rem;
+            white-space: pre-line;
+        }}
+        
+        pre {{
+            background-color: #0b0f19 !important;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 1rem !important;
+            overflow-x: auto;
+            margin-bottom: 1.5rem;
+        }}
+        
+        code {{
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem !important;
+        }}
+        
+        .exploit-plan h5 {{
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            margin: 1rem 0 0.5rem;
+        }}
+        
+        .exploit-plan ul {{
+            list-style-type: none;
+            padding-left: 0;
+        }}
+        
+        .exploit-plan li {{
+            position: relative;
+            padding-left: 1.5rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.95rem;
+        }}
+        
+        .exploit-plan li::before {{
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: var(--primary);
+            font-weight: bold;
+        }}
+        
+        .error-box {{
+            background-color: #450a0a;
+            border: 1px solid #991b1b;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+        }}
+        
+        .error-box h5 {{
+            color: #fca5a5;
+            margin-bottom: 0.5rem;
+        }}
+        
+        .error-box pre {{
+            background-color: #180202 !important;
+            border: 1px solid #7f1d1d;
+            margin-bottom: 0;
+        }}
+        
+        .no-poc {{
+            color: var(--text-muted);
+            font-style: italic;
+            text-align: center;
+            padding: 2rem;
+        }}
+        
+        .empty-state {{
+            background-color: var(--bg-card);
+            border: 1px dashed var(--border);
+            border-radius: 0.75rem;
+            padding: 4rem 2rem;
+            text-align: center;
+            color: var(--text-muted);
+        }}
+        
+        .recommendations-section {{
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            margin-bottom: 3rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }}
+        
+        .recommendations-section h2 {{
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+            color: var(--text-main);
+        }}
+        
+        .recommendations-section ul {{
+            padding-left: 1.5rem;
+        }}
+        
+        .recommendations-section li {{
+            margin-bottom: 0.75rem;
+            font-size: 0.95rem;
+        }}
+        
+        @media (max-width: 900px) {{
+            .report-layout {{
+                grid-template-columns: 1fr;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-container">
+            <div class="header-title">
+                <h1>Smart Contract Vulnerability Analysis Report</h1>
+                <p><strong>Contract:</strong> {contract_path} &nbsp;|&nbsp; <strong>Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            </div>
+            <span class="badge" style="background-color: var(--primary); padding: 0.5rem 1rem;">SmartGuard Report</span>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <div class="stats-grid">
+            <div class="stat-card accent">
+                <span class="stat-label">Total Vulnerabilities</span>
+                <span class="stat-value">{total_vulns}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">High Confidence (>0.70)</span>
+                <span class="stat-value" style="color: var(--high-conf);">{high_confidence_vulns}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">PoCs Generated</span>
+                <span class="stat-value">{total_pocs}</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Successful Exploit Runs</span>
+                <span class="stat-value" style="color: var(--low-conf);">{successful_pocs}</span>
+            </div>
+        </div>
+
+        <div class="report-layout">
+            <div class="sidebar">
+                <h2>Vulnerabilities</h2>
+                {f'<div class="sidebar-list">{vulns_sidebar_html}</div>' if rechecked_vulns else '<p style="color: var(--text-muted); font-style: italic;">No issues found</p>'}
+            </div>
+            
+            <div class="content-panel">
+                {vulns_html if rechecked_vulns else '<div class="empty-state"><h3>No vulnerabilities detected</h3><p class="mt-2">SmartGuard did not find any security concerns in the analyzed smart contract(s).</p></div>'}
+            </div>
+        </div>
+
+        <div class="recommendations-section">
+            <h2>Remediation & Recommendations</h2>
+            <ul>
+                {recs_html}
+            </ul>
+        </div>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+    <script>
+        function showVulnerability(index) {{
+            // Hide all detail cards
+            document.querySelectorAll('.vuln-details-card').forEach(card => {{
+                card.style.display = 'none';
+            }});
+            // Remove active class from all sidebar items
+            document.querySelectorAll('.sidebar-item').forEach(item => {{
+                item.classList.remove('active');
+            }});
+            
+            // Show target card
+            const targetCard = document.getElementById('vuln-details-' + index);
+            if (targetCard) {{
+                targetCard.style.display = 'block';
+            }}
+            // Add active class to clicked sidebar item
+            const items = document.querySelectorAll('.sidebar-item');
+            if (items[index - 1]) {{
+                items[index - 1].classList.add('active');
+            }}
+        }}
+
+        function switchDetailTab(event, tabId) {{
+            const container = event.currentTarget.closest('.tabs-container');
+            // Hide all tab content under this container
+            container.querySelectorAll('.detail-tab-content').forEach(content => {{
+                content.style.display = 'none';
+            }});
+            // Deactivate all tab buttons under this container
+            container.querySelectorAll('.tab-btn').forEach(btn => {{
+                btn.classList.remove('active');
+            }});
+            
+            // Show target tab content
+            document.getElementById(tabId).style.display = 'block';
+            // Activate current tab button
+            event.currentTarget.classList.add('active');
+        }}
+
+        // Initialize view by showing first vulnerability
+        document.addEventListener('DOMContentLoaded', () => {{
+            if ({total_vulns} > 0) {{
+                showVulnerability(1);
+            }}
+        }});
+    </script>
+</body>
+</html>"""
+
+    try:
+        with open(output_file, "w", encoding='utf-8') as f:
+            f.write(html_content)
+        print_success(f"HTML Report exported to {output_file}")
+        
+        # Open in default web browser
+        print_step("Opening HTML report in your browser...")
+        webbrowser.open("file://" + os.path.abspath(output_file))
+    except Exception as e:
+        print_error(f"Error writing HTML report: {e}")
+
 def export_results_to_markdown(contract_path, results):
     """Export analysis results to a markdown file"""
     from datetime import datetime
@@ -374,7 +1031,9 @@ def export_results_to_markdown(contract_path, results):
     # Create output filename based on the contract name
     contract_name = os.path.basename(contract_path)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f"analysis_report_{contract_name}_{timestamp}.md"
+    dir_path = "reports"
+    os.makedirs(dir_path, exist_ok=True)
+    output_file = os.path.join(dir_path, f"analysis_report_{contract_name}_{timestamp}.md")
 
     print_step(f"Exporting analysis report to {output_file}")
 

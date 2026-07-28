@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 
 // Component to show RAG details
 const RAGDetailsPanel = ({ details = [] }) => {

@@ -10,6 +10,7 @@ from langchain.docstore.document import Document
 from langchain.text_splitter import TokenTextSplitter
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
+from chromadb.config import Settings
 
 from utils.print_utils import create_progress_bar, print_step
 
@@ -139,6 +140,7 @@ def build_chroma_vectorstore_from_json(
     vectorstore = Chroma(
         persist_directory=persist_directory,
         embedding_function=embeddings,
+        client_settings=Settings(anonymized_telemetry=False),
     )
 
     try:

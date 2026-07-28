@@ -118,14 +118,14 @@ const ProjectContextPanel = ({ contextData }) => {
       
       let match;
       while ((match = usesRegex.exec(dep)) !== null) {
-        const [_, from, to] = match;
+        const [, from, to] = match;
         if (contractNames.includes(from) || contractNames.includes(to)) {
           diagram += `${from}-->${to};\n`;
         }
       }
       
       while ((match = dependsRegex.exec(dep)) !== null) {
-        const [_, from, to] = match;
+        const [, from, to] = match;
         if (contractNames.includes(from) || contractNames.includes(to)) {
           diagram += `${from}-->${to};\n`;
         }

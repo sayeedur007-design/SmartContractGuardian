@@ -5,7 +5,14 @@ from typing import Optional
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
-console = Console()
+# Windows terminals and redirected output can default to cp1252, which cannot
+# render the status symbols used throughout the CLI.  Configure text streams
+# once before Rich (or any local Console instances) writes to them.
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
+console = Console(legacy_windows=False)
 
 def print_header(text: str):
     """Print a section header with formatting"""

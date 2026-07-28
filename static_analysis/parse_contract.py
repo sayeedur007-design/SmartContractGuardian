@@ -6,6 +6,7 @@ from slither.solc_parsing.expressions.find_variable import SolidityFunction
 from .slither_detectors import DETECTORS
 from .call_graph_printer import PrinterCallGraphV2
 from typing import Dict, List
+from pathlib import Path
 import json
 import os
 from .extract_contracts import process_contract_file
@@ -17,10 +18,15 @@ def analyze_contract(filepath: str):
     1. A list of function details (name, visibility, parameters, returns, etc.)
     2. A call graph mapping each function to the functions it calls
     """
-    # Define the solc_remaps
-    solc_remaps = [
-        "@openzeppelin=/Users/advait/Desktop/NTU/fyp-fr/static_analysis/node_modules/@openzeppelin"
-    ]
+    # Only add a remapping when the dependency is available locally.  The
+    # previous absolute macOS path made Slither fail on every other machine.
+    project_root = Path(__file__).resolve().parent.parent
+    openzeppelin_dir = project_root / "node_modules" / "@openzeppelin"
+    solc_remaps = (
+        [f"@openzeppelin={openzeppelin_dir.as_posix()}"]
+        if openzeppelin_dir.is_dir()
+        else []
+    )
     
     # Preprocess the contract file - check if it's a JSON bundle and extract if needed
     temp_dir = None
