@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Contract Vulnerability Analysis Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <style>
+        :root {
+            --bg-main: #0f172a;
+            --bg-card: #1e293b;
+            --bg-accent: #334155;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --primary: #4f46e5;
+            --primary-gradient: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+            --border: #475569;
+            
+            --high-conf: #ef4444;
+            --med-conf: #f59e0b;
+            --low-conf: #10b981;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            line-height: 1.6;
+        }
+        
+        header {
+            background: var(--primary-gradient);
+            padding: 2rem;
+            color: white;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            margin-bottom: 2rem;
+        }
+        
+        .header-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header-title h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            color: white;
+        }
+        
+        .header-title p {
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.9);
+        }
+        
+        .main-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2.5rem;
+        }
+        
+        .stat-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+        }
+        
+        .stat-card .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+        
+        .stat-card .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+        
+        .stat-card.accent {
+            border-left: 4px solid var(--primary);
+        }
+        
+        .report-layout {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 2rem;
+            margin-bottom: 3rem;
+            align-items: start;
+        }
+        
+        .sidebar {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }
+        
+        .sidebar h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-main);
+        }
+        
+        .sidebar-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        
+        .sidebar-item {
+            padding: 1rem;
+            background-color: var(--bg-accent);
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: background-color 0.2s, border-color 0.2s;
+            border: 1px solid transparent;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .sidebar-item:hover {
+            background-color: #475569;
+        }
+        
+        .sidebar-item.active {
+            background-color: var(--primary);
+            border-color: var(--primary);
+        }
+        
+        .sidebar-title {
+            font-weight: 500;
+            font-size: 0.9rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 70%;
+        }
+        
+        .badge {
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            text-transform: uppercase;
+        }
+        
+        .conf-high { background-color: var(--high-conf); color: white; }
+        .conf-medium { background-color: var(--med-conf); color: black; }
+        .conf-low { background-color: var(--low-conf); color: white; }
+        
+        .content-panel {
+            min-height: 500px;
+        }
+        
+        .vuln-details-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+            animation: fadeIn 0.3s ease-in-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .details-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .details-header h3 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+        
+        .details-body {
+            padding: 1.5rem;
+        }
+        
+        .meta-section {
+            margin-bottom: 1.5rem;
+            font-size: 0.95rem;
+            background-color: var(--bg-accent);
+            padding: 1rem;
+            border-radius: 0.5rem;
+        }
+        
+        .tabs-container {
+            margin-top: 1.5rem;
+        }
+        
+        .tab-buttons {
+            display: flex;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        
+        .tab-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            padding: 0.75rem 1.5rem;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: color 0.2s, border-bottom-color 0.2s;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+        }
+        
+        .tab-btn:hover {
+            color: var(--text-main);
+        }
+        
+        .tab-btn.active {
+            color: var(--text-main);
+            border-bottom: 2px solid var(--primary);
+            font-weight: 600;
+        }
+        
+        .detail-tab-content h4 {
+            font-size: 1.1rem;
+            margin: 1.5rem 0 0.75rem;
+            border-bottom: 1px dashed var(--border);
+            padding-bottom: 0.25rem;
+            color: var(--text-main);
+        }
+        
+        .detail-tab-content h4:first-child {
+            margin-top: 0;
+        }
+        
+        .reasoning-text {
+            font-size: 0.95rem;
+            color: #cbd5e1;
+            margin-bottom: 1.5rem;
+            white-space: pre-line;
+        }
+        
+        pre {
+            background-color: #0b0f19 !important;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 1rem !important;
+            overflow-x: auto;
+            margin-bottom: 1.5rem;
+        }
+        
+        code {
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem !important;
+        }
+        
+        .exploit-plan h5 {
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            margin: 1rem 0 0.5rem;
+        }
+        
+        .exploit-plan ul {
+            list-style-type: none;
+            padding-left: 0;
+        }
+        
+        .exploit-plan li {
+            position: relative;
+            padding-left: 1.5rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.95rem;
+        }
+        
+        .exploit-plan li::before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: var(--primary);
+            font-weight: bold;
+        }
+        
+        .error-box {
+            background-color: #450a0a;
+            border: 1px solid #991b1b;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .error-box h5 {
+            color: #fca5a5;
+            margin-bottom: 0.5rem;
+        }
+        
+        .error-box pre {
+            background-color: #180202 !important;
+            border: 1px solid #7f1d1d;
+            margin-bottom: 0;
+        }
+        
+        .no-poc {
+            color: var(--text-muted);
+            font-style: italic;
+            text-align: center;
+            padding: 2rem;
+        }
+        
+        .empty-state {
+            background-color: var(--bg-card);
+            border: 1px dashed var(--border);
+            border-radius: 0.75rem;
+            padding: 4rem 2rem;
+            text-align: center;
+            color: var(--text-muted);
+        }
+        
+        .recommendations-section {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            margin-bottom: 3rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }
+        
+        .recommendations-section h2 {
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+            color: var(--text-main);
+        }
+        
+        .recommendations-section ul {
+            padding-left: 1.5rem;
+        }
+        
+        .recommendations-section li {
+            margin-bottom: 0.75rem;
+            font-size: 0.95rem;
+        }
+        
+        @media (max-width: 900px) {
+            .report-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-container">
+            <div class="header-title">
+                <h1>Smart Contract Vulnerability Analysis Report</h1>
+                <p><strong>Contract:</strong> VulnerableBank.sol &nbsp;|&nbsp; <strong>Date:</strong> 2026-07-28 23:50:47</p>
+            </div>
+            <span class="badge" style="background-color: var(--primary); padding: 0.5rem 1rem;">SmartGuard Report</span>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <div class="stats-grid">
+            <div class="stat-card accent">
+                <span class="stat-label">Total Vulnerabilities</span>
+                <span class="stat-value">3</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">High Confidence (>0.70)</span>
+                <span class="stat-value" style="color: var(--high-conf);">0</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">PoCs Generated</span>
+                <span class="stat-value">3</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Successful Exploit Runs</span>
+                <span class="stat-value" style="color: var(--low-conf);">0</span>
+            </div>
+        </div>
+
+        <div class="report-layout">
+            <div class="sidebar">
+                <h2>Vulnerabilities</h2>
+                <div class="sidebar-list">
+        <div class="sidebar-item" onclick="showVulnerability(1)">
+            <span class="sidebar-title">access_control</span>
+            <span class="badge conf-medium">Conf: 0.70</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(2)">
+            <span class="sidebar-title">business_logic</span>
+            <span class="badge conf-low">Conf: 0.30</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(3)">
+            <span class="sidebar-title">unchecked_low_level_calls</span>
+            <span class="badge conf-low">Conf: 0.20</span>
+        </div>
+        </div>
+            </div>
+            
+            <div class="content-panel">
+                
+        <div id="vuln-details-1" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>access_control</h3>
+                <span class="badge conf-medium">Confidence: 0.70</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> setValue</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-1')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-1')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-1" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The contract lacks proper access control on its functions. All public functions are accessible by anyone, including the externalCallFlag check function, which could be used to bypass intended checks in other parts of the contract.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>While there is no clear business logic flaw directly evident in this particular function, setting a value without access control might be exploitable for specific scenarios unrelated to the primary business purpose. This warrants attention as it could allow unexpected alterations of contract state.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function setValue(uint256 _value) public {
+        value = _value;
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-1" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code>PoC_unknown_1785262382.sol</code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 2)</span></p>
+                <div class='error-box'><h5>Error Output:</h5><pre><code>Error
+fail
+Error
+Error</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Create a simple Solidity contract with the vulnerable setValue function</li><li>Step 2: Deploy the contract on a local blockchain (e.g., Ganache, Hardhat) to simulate a test environment</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Interact with the contract using an account that is not deploying the contract (simulating user interaction)</li><li>Step 2: Invoke the setValue function through this external account and demonstrate how any value can be set</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: Explain that this vulnerability allows anyone, including non-authorized accounts, to change the state of the contract without proper access control</li><li>Step 2: Show the fix by adding a modifier to restrict access to authorized accounts (e.g., owner) in the setValue function</li></ul>
+            </div>
+            
+                <h5>Exploit Code</h5><pre><code class='language-solidity'>// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.17;
+
+import "./basetest.sol";
+import "../VulnerableContract.sol";
+
+contract YourTest is BaseTestWithBalanceLog {
+    VulnerableContract vulnerableContract;
+    address userAccount;
+
+    function setUp() public override {
+        vm.deal(address(this), 100 ether);
+        vm.label(address(this), "Deploying Contract");
+        vm.label(address(vulnerableContract), "Vulnerable Contract");
+
+        // Deploy contract
+        vulnerableContract = new VulnerableContract();
+        userAccount = address(2);
+
+        // FUND THE USER ACCOUNT WITH 10 ETHER
+        vm.deal(userAccount, 10 ether);
+    }
+
+    function testExploit() public balanceLog {
+        assertEq(vulnerableContract.value(), 0);
+
+        vm.startPrank(userAccount); // impersonate user account
+        vulnerableContract.setValue(123456789); // exploit: set value to any number
+
+        // Check for vulnerabilities here - the value can be anything!
+        assertNotEq(vulnerableContract.value(), 0);
+        assertEq(vulnerableContract.value(), 123456789, "Unauthorized access allowed setting state");
+
+        vm.stopPrank(); // stop impersonating
+
+        // Fix: Add onlyOwner modifier to restrict access
+    }
+}</code></pre>
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-2" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>business_logic</h3>
+                <span class="badge conf-low">Confidence: 0.30</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> setValue</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-2')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-2')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-2" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The contract lacks proper logic checks for value transfers, especially when dealing with ETH and ERC20 tokens. There is no check on whether the transfer was successful or if the caller has sufficient funds.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>The reported business logic issue does not seem to raise significant concerns that would affect the overall functionality of the contract based on the provided context.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function setValue(uint256 _value) public {
+        value = _value;
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-2" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code>PoC_unknown_1785262441.sol</code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 2)</span></p>
+                <div class='error-box'><h5>Error Output:</h5><pre><code>ERROR
+error
+error
+Error
+fail
+Error
+Error
+Error
+Error
+Error
+Error</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Create a simple ERC20 token contract</li><li>Step 2: Deploy the token contract to a test environment (e.g., Remix)</li><li>Step 3: Create an attacker account and fund it with ETH for gas fees</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Normal operation - Transfer tokens from the attacker's account to the token contract</li><li>Step 2: Potentially malicious operation - Set a bad value in the contract that could be exploited if not properly checked</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: The vulnerability here is the lack of proper checks for successful transfers and sufficient funds, which is a business logic error.</li><li>Step 2: Develop a secure version of the vulnerable function with proper checks. Example: Ensure that the transfer was successful and that the caller has enough balance.</li></ul>
+            </div>
+            
+                <h5>Exploit Code</h5><pre><code class='language-solidity'>// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+import "./basetest.sol";
+import "../VulnerableContract.sol";
+
+contract SecureToken is BaseTestWithBalanceLog {
+    address tokenContractAddress;
+    VulnerableERC20 vulnerableToken;
+
+    function setUp() public override {
+        // Deploy the vulnerable token contract
+        vm.deal(address(this), 100 ether);
+        vulnerableToken = new VulnerableERC20();
+        tokenContractAddress = address(vulnerableToken);
+
+        super.setUp();
+    }
+
+    function testExploit() public balanceLog {
+        // Create an attacker account and fund it with ETH for gas fees
+        address attacker = vm.addr(1);
+        vm.deal(attacker, 1 ether);
+
+        // Transfer tokens from the attacker's account to the token contract
+        vm.prank(attacker);
+        vulnerableToken.transfer(tokenContractAddress, 1000); // Insufficient checks
+
+        // Potential malicious operation: Set a bad value that could be exploited if not properly checked
+        vm.expectRevert("Insufficient funds"); // This is just for demonstration purposes as actual token contracts don't usually allow this kind of direct setting of values in the way shown.
+    }
+}
+
+contract VulnerableERC20 {
+    string public name = "VulnerableToken";
+    string public symbol = "VTK";
+    uint8 public decimals = 18;
+    mapping(address => uint256) public balanceOf;
+
+    function transfer(address to, uint256 value) public returns (bool success) {
+        require(balanceOf[msg.sender] >= value, "Insufficient funds");
+        balanceOf[msg.sender] -= value;
+        balanceOf[to] += value;
+        emit Transfer(msg.sender, to, value);
+        return true;
+    }
+
+    event Transfer(address indexed from, address indexed to, uint256 value);
+}</code></pre>
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-3" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>unchecked_low_level_calls</h3>
+                <span class="badge conf-low">Confidence: 0.20</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> loseBalance, transferAnyERC20Token</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-3')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-3')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-3" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The contract uses low-level calls without checking the return values. This could lead to an attacker draining contract funds or causing the contract to revert in ways not handled by the code.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>This function does not contain any low-level calls, therefore this vulnerability is not applicable.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>(No matching function code found)</code></pre>
+                    </div>
+                    
+                    <div id="poc-3" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code>PoC_unknown_1785262740.sol</code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 2)</span></p>
+                <div class='error-box'><h5>Error Output:</h5><pre><code>ERROR
+error
+error
+ERROR
+error
+error
+Error
+fail
+Error
+Error
+Error
+Error
+Error
+Error
+Error
+Error</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>{
+                "description": "Create a simple smart contract that uses low-level calls without checking return values. The contract should have functions to lose balance and transfer ERC20 tokens."
+            },
+            {
+                "description": "Deploy the smart contract on a test blockchain environment such as Remix or Hardhat with a test wallet for funds."
+            }
+        ],
+        "execution_steps": [
+            {
+                "description": "Interact with the `loseBalance` function from the test wallet. Ensure that funds are correctly deducted."
+            },
+            {
+                "description": "Set up an attacker wallet and attempt to invoke low-level calls in a malicious manner, such as sending ether to this wallet or calling non-existent functions."
+            }
+        ],
+        "validation_steps": [
+            {
+                "description": "Explain the principle of using unchecked low-level calls. Show how attackers can exploit unhandled return values to drain contract funds."
+            },
+            {
+                "description": "Demonstrate how developers should add return-value checks and error handling in their low-level calls, such as `if (!success) { revert(); }`, to prevent potential loss of funds or execution errors."
+            }
+        ]
+    }
+}</li></ul>
+                <h5>Execution</h5><ul><li>{
+                "description": "Interact with the `loseBalance` function from the test wallet. Ensure that funds are correctly deducted."
+            },
+            {
+                "description": "Set up an attacker wallet and attempt to invoke low-level calls in a malicious manner, such as sending ether to this wallet or calling non-existent functions."
+            }
+        ],
+        "validation_steps": [
+            {
+                "description": "Explain the principle of using unchecked low-level calls. Show how attackers can exploit unhandled return values to drain contract funds."
+            },
+            {
+                "description": "Demonstrate how developers should add return-value checks and error handling in their low-level calls, such as `if (!success) { revert(); }`, to prevent potential loss of funds or execution errors."
+            }
+        ]
+    }
+}</li></ul>
+                <h5>Validation</h5><ul><li>{
+                "description": "Explain the principle of using unchecked low-level calls. Show how attackers can exploit unhandled return values to drain contract funds."
+            },
+            {
+                "description": "Demonstrate how developers should add return-value checks and error handling in their low-level calls, such as `if (!success) { revert(); }`, to prevent potential loss of funds or execution errors."
+            }
+        ]
+    }
+}</li></ul>
+            </div>
+            
+                <h5>Exploit Code</h5><pre><code class='language-solidity'>// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.15;
+
+import "./basetest.sol";
+
+// @KeyInfo - Vulnerability: Unknown
+// Affected Functions: 
+// This test demonstrates the vulnerability found in the analyzed contract for educational purposes only
+
+contract UnknownExploitTest is BaseTestWithBalanceLog {
+    // For forking Ethereum mainnet
+    uint256 blockNumber = 18000000; // Recent Ethereum block
+
+    function setUp() public {
+        // Setup the fork
+        vm.createSelectFork("mainnet", blockNumber);
+
+        // Fund testing account with plenty of ETH for operations
+        vm.deal(address(this), 100 ether);
+
+        // Deploy any needed contracts for the demonstration
+        // TODO: Implement setup based on vulnerability type
+    }
+
+    function testExploit() public balanceLog {
+        console.log("Starting Unknown vulnerability demonstration");
+
+        // EDUCATIONAL NOTE: This test demonstrates how the Unknown vulnerability can manifest
+        // in smart contracts and how developers can protect against it.
+
+        // TODO: Implement the exploit based on the plan
+        // Setup steps:
+        // 1. {
+                "description": "Create a simple smart contract that uses low-level calls without checking return values. The contract should have functions to lose balance and transfer ERC20 tokens."
+            },
+            {
+                "description": "Deploy the smart contract on a test blockchain environment such as Remix or Hardhat with a test wallet for funds."
+            }
+        ],
+        "execution_steps": [
+            {
+                "description": "Interact with the `loseBalance` function from the test wallet. Ensure that funds are correctly deducted."
+            },
+            {
+                "description": "Set up an attacker wallet and attempt to invoke low-level calls in a malicious manner, such as sending ether to this wallet or calling non-existent functions."
+            }
+        ],
+        "validation_steps": [
+            {
+                "description": "Explain the principle of using unchecked low-level calls. Show how attackers can exploit unhandled return values to drain contract funds."
+            },
+            {
+                "description": "Demonstrate how developers should add return-value checks and error handling in their low-level calls, such as `if (!success) { revert(); }`, to prevent potential loss of funds or execution errors."
+            }
+        ]
+    }
+}
+
+        // Execution steps:
+        // 1. {
+                "description": "Interact with the `loseBalance` function from the test wallet. Ensure that funds are correctly deducted."
+            },
+            {
+                "description": "Set up an attacker wallet and attempt to invoke low-level calls in a malicious manner, such as sending ether to this wallet or calling non-existent functions."
+            }
+        ],
+        "validation_steps": [
+            {
+                "description": "Explain the principle of using unchecked low-level calls. Show how attackers can exploit unhandled return values to drain contract funds."
+            },
+            {
+                "description": "Demonstrate how developers should add return-value checks and error handling in their low-level calls, such as `if (!success) { revert(); }`, to prevent potential loss of funds or execution errors."
+            }
+        ]
+    }
+}
+
+        // SECURITY BEST PRACTICE: Always handle errors from external calls and check return values
+
+        // Validation steps:
+        // 1. {
+                "description": "Explain the principle of using unchecked low-level calls. Show how attackers can exploit unhandled return values to drain contract funds."
+            },
+            {
+                "description": "Demonstrate how developers should add return-value checks and error handling in their low-level calls, such as `if (!success) { revert(); }`, to prevent potential loss of funds or execution errors."
+            }
+        ]
+    }
+}
+
+        // MITIGATION STRATEGIES:
+        // 1. Always follow the checks-effects-interactions pattern
+        // 2. Use OpenZeppelin's security tools and libraries
+        // 3. Get multiple professional audits before deploying important contracts
+    }
+}
+</code></pre>
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+            </div>
+        </div>
+
+        <div class="recommendations-section">
+            <h2>Remediation & Recommendations</h2>
+            <ul>
+                <li><strong>Access Control:</strong> Use modifiers (e.g. <code>onlyOwner</code>), check roles properly.</li><li><strong>Unchecked Returns:</strong> Check return values of external calls.</li><li><strong>General:</strong> Conduct thorough testing and consider professional audits.</li>
+            </ul>
+        </div>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+    <script>
+        function showVulnerability(index) {
+            // Hide all detail cards
+            document.querySelectorAll('.vuln-details-card').forEach(card => {
+                card.style.display = 'none';
+            });
+            // Remove active class from all sidebar items
+            document.querySelectorAll('.sidebar-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            
+            // Show target card
+            const targetCard = document.getElementById('vuln-details-' + index);
+            if (targetCard) {
+                targetCard.style.display = 'block';
+            }
+            // Add active class to clicked sidebar item
+            const items = document.querySelectorAll('.sidebar-item');
+            if (items[index - 1]) {
+                items[index - 1].classList.add('active');
+            }
+        }
+
+        function switchDetailTab(event, tabId) {
+            const container = event.currentTarget.closest('.tabs-container');
+            // Hide all tab content under this container
+            container.querySelectorAll('.detail-tab-content').forEach(content => {
+                content.style.display = 'none';
+            });
+            // Deactivate all tab buttons under this container
+            container.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Show target tab content
+            document.getElementById(tabId).style.display = 'block';
+            // Activate current tab button
+            event.currentTarget.classList.add('active');
+        }
+
+        // Initialize view by showing first vulnerability
+        document.addEventListener('DOMContentLoaded', () => {
+            if (3 > 0) {
+                showVulnerability(1);
+            }
+        });
+    </script>
+</body>
+</html>

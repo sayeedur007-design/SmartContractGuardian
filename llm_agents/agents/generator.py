@@ -1,428 +1,285 @@
-# llm_agents/agents/generator.py
-
-import time
+"""Foundry PoC generation with deterministic validation and compile gating."""
 import os
-import json
-from typing import Dict, List, Optional
+import re
+import subprocess
+import time
+import uuid
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 from openai import OpenAI
-from utils.print_utils import create_progress_spinner, print_warning, print_success
+
+from utils.print_utils import print_success, print_warning
+
 
 class GeneratorAgent:
+    """Generate only PoCs that pass structural, semantic, and Forge checks."""
+
+    MAX_ATTEMPTS = 3
+
     def __init__(self, model_config=None):
         from ..config import ModelConfig
 
         self.model_config = model_config or ModelConfig()
         self.model_name = self.model_config.get_model("generator")
-
-        # Get provider info for the selected model
         _, api_key_env, _ = self.model_config.get_provider_info(self.model_name)
-
-        # Initialize OpenAI client with the correct settings
         self.client = OpenAI(
             api_key=os.getenv(api_key_env),
-            **self.model_config.get_openai_args(self.model_name)
+            **self.model_config.get_openai_args(self.model_name),
         )
+        self.project_root = Path.cwd()
+        self.exploit_root = self.project_root / "exploit"
+        self.test_dir = self.exploit_root / "src" / "test"
 
-    def generate(self, exploit_plan: Dict) -> Dict:
-        """
-        Generate a complete exploit based on the provided exploit plan.
+    def generate(self, exploit_data: Dict) -> Dict:
+        """Generate, validate, self-review, compile, then persist a PoC."""
+        vulnerability = exploit_data.get("vulnerability", {})
+        plan = exploit_data.get("exploit_plan", {}) or {}
+        target = self._resolve_target(exploit_data)
+        failures: List[str] = []
 
-        Args:
-            exploit_plan: Contains the vulnerability information and exploit steps
+        self.generate_basetest_file() if not (self.test_dir / "basetest.sol").exists() else None
+        for attempt in range(1, self.model_config.poc_generation_attempts + 1):
+            code = self.generate_poc_contract(vulnerability, plan, target, failures, attempt)
+            errors = self.validate_contract(code, vulnerability, target)
+            if errors:
+                failures = errors
+                print_warning(f"Generator attempt {attempt} rejected: {'; '.join(errors)}")
+                continue
 
-        Returns:
-            Dictionary with the exploit test contract and execution information
-        """
-        # Extract vulnerability type and other information
-        vuln_info = exploit_plan.get("vulnerability", {})
-        vuln_type = vuln_info.get("vulnerability_type", "unknown")
+            review = self._self_review(code, vulnerability, target)
+            if review:
+                failures = [f"Self-review: {review}"]
+                print_warning(f"Generator attempt {attempt} self-review rejected the contract: {review}")
+                continue
 
-        # Generate the PoC contract
-        contract_code = self.generate_poc_contract(vuln_info, exploit_plan.get("exploit_plan", {}))
+            compiled, forge_output = self.compile_candidate(code)
+            self._write_generation_log(attempt, "build", forge_output)
+            if not compiled:
+                failures = [f"Forge build failed:\n{forge_output}"]
+                print_warning(f"Generator attempt {attempt} did not compile.")
+                continue
 
-        # Save the contract to a file
-        filename = self.save_poc_locally(contract_code, vuln_type)
-        filename_for_command = filename
-
-        filename_parts = filename.split("/", 1)
-        if len(filename_parts) > 1:
-            filename_for_command = '.' + '/' + filename_parts[1]
+            filename = self.save_poc_locally(code, vulnerability.get("vulnerability_type", "unknown"))
+            relative = Path(filename).resolve().relative_to(self.exploit_root.resolve()).as_posix()
+            return {
+                "exploit_code": code,
+                "exploit_file": filename,
+                "execution_command": f'forge test -vv --match-path "./{relative}"',
+                "target_contract": target,
+                "compile_output": forge_output,
+            }
 
         return {
-            "exploit_code": contract_code,
-            "exploit_file": filename,
-            "execution_command": f"forge test -vv --match-path {filename_for_command}"
+            "exploit_code": "",
+            "exploit_file": "",
+            "execution_command": "",
+            "target_contract": target,
+            "generation_error": "PoC generation failed after deterministic validation and Forge compilation.",
+            "validation_errors": failures,
         }
 
-    def generate_poc_contract(self, vulnerability_info: Dict, exploit_plan: Dict) -> str:
-        """
-        Generate a custom Foundry test contract for the specific vulnerability
+    def generate_poc_contract(
+        self, vulnerability: Dict, plan: Dict, target: Dict, failures: List[str], attempt: int
+    ) -> str:
+        affected = ", ".join(self._extract_relevant_functions(vulnerability)) or "not specified"
+        previous_failures = "None (first attempt)." if not failures else "\n".join(f"- {item}" for item in failures)
+        prompt = f"""ROLE
+You are a Solidity security engineer writing one self-contained, defensive Foundry regression test.
 
-        Args:
-            vulnerability_info: Information about the vulnerability
-            exploit_plan: The steps to exploit the vulnerability
+OBJECTIVE
+Produce a complete PoC test which demonstrates the reported issue against the supplied target contract and compiles in this Foundry repository.
 
-        Returns:
-            Complete Solidity code for the Proof of Concept
-        """
-        # Get the vulnerability type and details
-        vuln_type = vulnerability_info.get("vulnerability_type", "unknown")
-        affected_functions = self._extract_relevant_functions(vulnerability_info)
-        reasoning = vulnerability_info.get("reasoning", "No reasoning provided")
-        code_snippet = vulnerability_info.get("code_snippet", "// No code snippet provided")
+INPUT
+Target source file: {target['filename']}
+Target contract: {target['contract_name']}
+Reported vulnerability: {vulnerability.get('vulnerability_type', 'unknown')}
+Affected functions: {affected}
+Reasoning: {vulnerability.get('reasoning', '')}
+Exploit plan: {plan}
+Previous attempt feedback (attempt {attempt}):
+{previous_failures}
 
-        # Parse the exploit steps
-        setup_steps = self._parse_steps(exploit_plan.get("setup_steps", []))
-        execution_steps = self._parse_steps(exploit_plan.get("execution_steps", []))
-        validation_steps = self._parse_steps(exploit_plan.get("validation_steps", []))
+STRICT REQUIREMENTS
+- Include SPDX and pragma solidity.
+- Import exactly `./basetest.sol` and `../{target['filename']}`.
+- Declare a test contract inheriting `BaseTestWithBalanceLog`.
+- Include non-empty `setUp()` and `testExploit()` functions.
+- `testExploit()` must use `balanceLog`; both setup or test must call `vm.deal`.
+- Instantiate or otherwise use `{target['contract_name']}` and call the reported affected function when one is supplied.
+- Use only contracts/interfaces declared in this file or the two imports. Do not use placeholders, TODOs, ellipses, or fork RPCs.
+- Rewrite the entire contract; do not patch a prior response.
 
-        # Use OpenAI to generate a custom PoC based on the vulnerability details
-        prompt = f"""
-You are a smart contract security educator. Create a complete Foundry test contract that demonstrates the following vulnerability FOR EDUCATIONAL PURPOSES ONLY:
-
-Vulnerability Type: {vuln_type}
-Affected Functions: {', '.join(affected_functions)}
-Reasoning: {reasoning}
-Code Snippet:
-```solidity
-{code_snippet}
-```
-
-Educational Demonstration Plan:
-Setup Steps:
-{setup_steps}
-
-Demonstration Steps:
-{execution_steps}
-
-Validation Steps:
-{validation_steps}
-
-IMPORTANT FOUNDRY TEST REQUIREMENTS:
-1. Import basetest.sol from the current directory: `import "./basetest.sol";`
-2. Import the contract under analysis using the relative path: `import "../VulnerableContract.sol";` (DO NOT import from any other path, and DO NOT use `@openzeppelin` or other external libraries).
-3. Your contract must extend BaseTestWithBalanceLog: `contract YourTest is BaseTestWithBalanceLog`
-4. In the setUp() function, ensure the test contract has enough ETH: `vm.deal(address(this), 100 ether);`
-5. Use the balanceLog modifier on your test function: `function testExploit() public balanceLog`
-6. In the testExploit function, ensure the test address/contract has enough ETH: `vm.deal(address(this), 10 ether);`
-7. Check return values from all external calls and handle errors properly
-8. Define any required helper contracts or interfaces (like custom ERC20s, mock attackers) inline within the test file.
-
-The educational test contract should:
-1. Be a complete, compilable Solidity file using Foundry's Test framework
-2. Include all necessary setup to demonstrate the vulnerability concept
-3. Show how the vulnerability works with sample code - THIS IS PURELY FOR EDUCATIONAL PURPOSES
-4. Provide clear comments explaining the vulnerability and how to prevent it
-5. Define all needed interfaces for external contracts
-6. Use realistic but safe values and parameters
-7. Include educational comments about how developers can avoid this issue
-8. Ensure proper error handling for all calls
-9. Always check for sufficient funds before making ETH transfers
-
-Remember this is for educational and defensive purposes only. The goal is to help developers understand vulnerabilities so they can write more secure code.
-
-Return only the complete Solidity code with no additional explanations.
+OUTPUT FORMAT
+RETURN ONLY SOLIDITY
 """
+        return self._clean_solidity(self._chat(prompt))
 
-        # Create appropriate messages based on model type
-        if self.model_config.supports_reasoning(self.model_name):
-            messages = [
-                {"role": "system", "content": "You are a smart contract security educator creating educational PoC tests."},
-                {"role": "user", "content": prompt}
-            ]
-        else:
-            messages = [
-                {"role": "user", "content": prompt}
-            ]
+    def validate_contract(self, code: str, vulnerability: Dict, target: Dict) -> List[str]:
+        """Deterministic checks; this is deliberately independent of model judgement."""
+        errors: List[str] = []
+        if not re.search(r"^\s*//\s*SPDX-License-Identifier:\s*\S+", code, re.M):
+            errors.append("missing SPDX license")
+        if not re.search(r"\bpragma\s+solidity\s+[^;]+;", code):
+            errors.append("missing pragma")
+        imports = re.findall(r"^\s*import\s+(?:[^\"']+from\s+)?[\"']([^\"']+)[\"']\s*;", code, re.M)
+        if "./basetest.sol" not in imports:
+            errors.append("missing basetest import")
+        expected_import = f"../{target['filename']}"
+        if expected_import not in imports:
+            errors.append(f"missing target import {expected_import}")
+        if re.search(r"\b(TODO|placeholder|fill\s+here)\b|\.\.\.", code, re.I):
+            errors.append("contains placeholder content")
+        if not self._braces_match(code):
+            errors.append("malformed braces")
+        contract_match = re.search(
+            r"\bcontract\s+\w+\s+is\s+[^\{]*\bBaseTestWithBalanceLog\b[^\{]*\{", code
+        )
+        if not contract_match:
+            errors.append("missing BaseTestWithBalanceLog test contract")
+        setup = self._function_body(code, "setUp")
+        test = self._function_body(code, "testExploit")
+        if not setup or not re.search(r"\S", self._without_comments(setup)):
+            errors.append("missing or empty setUp")
+        if not test or not re.search(r"\S", self._without_comments(test)):
+            errors.append("missing or empty testExploit")
+        if not re.search(r"function\s+testExploit\s*\([^)]*\)\s*(?:public|external)[^{]*\bbalanceLog\b", code):
+            errors.append("testExploit does not use balanceLog")
+        if "vm.deal" not in code:
+            errors.append("missing vm.deal")
+        if not re.search(rf"\b{re.escape(target['contract_name'])}\b", code):
+            errors.append("target contract name is not used")
+        source_functions = set(target.get("functions", []))
+        affected = self._extract_relevant_functions(vulnerability)
+        for function in affected:
+            if source_functions and function not in source_functions:
+                errors.append(f"reported affected function does not exist: {function}")
+            elif source_functions and not re.search(rf"\.\s*{re.escape(function)}\s*\(", code):
+                errors.append(f"PoC does not call affected function: {function}")
+        return errors
 
-        # Import token tracker
-        from utils.token_tracker import token_tracker
-        
-        if self.model_name == "claude-3-7-sonnet-latest":
-            resp = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                max_tokens=64000,
-                extra_body={ "thinking": { "type": "enabled", "budget_tokens": 2000 } },
+    def compile_candidate(self, code: str) -> Tuple[bool, str]:
+        """Compile a temporary test and never leave it in the persisted test suite."""
+        self.test_dir.mkdir(parents=True, exist_ok=True)
+        temporary = self.test_dir / f".poc_validation_{uuid.uuid4().hex}.t.sol"
+        try:
+            temporary.write_text(code, encoding="utf-8")
+            relative = temporary.relative_to(self.exploit_root).as_posix()
+            result = subprocess.run(
+                ["forge", "build", "--force", "--contracts", relative],
+                cwd=self.exploit_root,
+                capture_output=True,
+                text=True,
+                timeout=self.model_config.forge_build_timeout,
             )
-        else:
-            resp = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages
-            )
-            
-        # Track token usage
-        if hasattr(resp, 'usage') and resp.usage:
-            token_tracker.log_tokens(
-                agent_name="generator",
-                model_name=self.model_name,
-                prompt_tokens=resp.usage.prompt_tokens,
-                completion_tokens=resp.usage.completion_tokens,
-                total_tokens=resp.usage.total_tokens
-            )
+            output = (result.stdout or "") + ("\n" if result.stdout and result.stderr else "") + (result.stderr or "")
+            return result.returncode == 0, output
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return False, f"Unable to run forge build: {exc}"
+        finally:
+            temporary.unlink(missing_ok=True)
 
-        # Extract the code from the response
-        response_text = resp.choices[0].message.content.strip()
-
-        # Clean up the response if it has markdown code blocks
-        import re
-        if "```" in response_text:
-            match = re.search(r"```(?:solidity)?\s*([\s\S]*?)\s*```", response_text)
-            if match:
-                response_text = match.group(1).strip()
-
-        # Ensure we have a valid contract by doing some basic checks
-        if "contract" not in response_text or "function test" not in response_text:
-            # Fallback to a basic template if the AI didn't generate valid code
-            return self._generate_basic_template(vulnerability_info, exploit_plan)
-
-        return response_text
+    def _write_generation_log(self, attempt: int, stage: str, output: str) -> None:
+        """Keep each generation diagnostic; never overwrite a prior investigation log."""
+        reports = self.project_root / "reports"
+        reports.mkdir(exist_ok=True)
+        filename = reports / f"generator_{int(time.time() * 1000)}_attempt{attempt}_{stage}.log"
+        filename.write_text(output, encoding="utf-8")
 
     def save_poc_locally(self, poc_code: str, vuln_type: str) -> str:
-        """
-        Save the generated PoC contract to a file
-
-        Args:
-            poc_code: The Solidity code
-            vuln_type: Type of vulnerability
-
-        Returns:
-            The filename where the code was saved
-        """
-        # Create exploit directory if it doesn't exist
-        os.makedirs("exploit", exist_ok=True)
-
-        ts = int(time.time())
-        filename = f"exploit/src/test/PoC_{vuln_type}_{ts}.sol"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(poc_code)
-
+        self.test_dir.mkdir(parents=True, exist_ok=True)
+        safe_vuln = re.sub(r"[^A-Za-z0-9_]", "_", vuln_type) or "unknown"
+        filename = self.test_dir / f"PoC_{safe_vuln}_{int(time.time() * 1000)}.t.sol"
+        filename.write_text(poc_code, encoding="utf-8")
         print_success(f"PoC saved to {filename}")
-        return filename
+        return str(filename)
 
-    def _extract_relevant_functions(self, vulnerability_info: Dict) -> List[str]:
-        """
-        Extract relevant function names from vulnerability info
-        """
-        functions = vulnerability_info.get("affected_functions", [])
-        return [fn.split(".")[-1] if "." in fn else fn for fn in functions]
+    def _resolve_target(self, exploit_data: Dict) -> Dict:
+        configured = exploit_data.get("target_contract", {})
+        candidates = []
+        if configured.get("path"):
+            candidates.append(self.exploit_root / "src" / configured["path"])
+        candidates.extend(path for path in (self.exploit_root / "src").glob("*.sol") if path.name != "basetest.sol")
+        for path in candidates:
+            if path.exists():
+                source = path.read_text(encoding="utf-8")
+                contract = configured.get("name") or self._contract_name(source)
+                if contract:
+                    return {"filename": path.name, "contract_name": contract, "functions": self._source_functions(source)}
+        return {"filename": "VulnerableContract.sol", "contract_name": "VulnerableContract", "functions": []}
 
-    def _parse_steps(self, steps: List[str]) -> str:
-        """
-        Parse steps from exploit plan and format them
-        """
-        if not steps:
-            return "No specific steps provided"
+    @staticmethod
+    def _contract_name(source: str) -> Optional[str]:
+        match = re.search(r"\b(?:abstract\s+)?contract\s+([A-Za-z_]\w*)", source)
+        return match.group(1) if match else None
 
-        formatted_steps = []
-        for i, step in enumerate(steps, 1):
-            formatted_steps.append(f"{i}. {step}")
+    @staticmethod
+    def _source_functions(source: str) -> List[str]:
+        return re.findall(r"\bfunction\s+([A-Za-z_]\w*)\s*\(", source)
 
-        return "\n".join(formatted_steps)
+    @staticmethod
+    def _extract_relevant_functions(vulnerability: Dict) -> List[str]:
+        values = vulnerability.get("affected_functions", []) or []
+        return [str(value).split(".")[-1] for value in values if str(value).strip()]
 
-    def _generate_basic_template(self, vulnerability_info: Dict, exploit_plan: Dict) -> str:
-        """
-        Generate a basic template as a fallback
-        """
-        vuln_type = vulnerability_info.get("vulnerability_type", "unknown").capitalize()
-        affected_functions = self._extract_relevant_functions(vulnerability_info)
+    def _self_review(self, code: str, vulnerability: Dict, target: Dict) -> str:
+        prompt = f"""Review this Solidity Foundry test. Answer exactly PASS, or FAIL: followed by one concrete compilation/rule violation. It must import ./basetest.sol and ../{target['filename']}, inherit BaseTestWithBalanceLog, use balanceLog and vm.deal, and exercise {target['contract_name']} for {self._extract_relevant_functions(vulnerability)}.\n\n{code}"""
+        try:
+            response = self._chat(prompt).strip()
+        except Exception as exc:
+            return f"review request failed: {exc}"
+        return "" if response.upper().startswith("PASS") else response[:2000]
 
-        return f"""// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.15;
+    def _chat(self, prompt: str) -> str:
+        messages = ([{"role": "system", "content": "Return precise Solidity engineering output."}, {"role": "user", "content": prompt}]
+                    if self.model_config.supports_reasoning(self.model_name) else [{"role": "user", "content": prompt}])
+        kwargs = {"model": self.model_name, "messages": messages}
+        if self.model_name == "claude-3-7-sonnet-latest":
+            kwargs.update(max_tokens=64000, extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}})
+        response = self.client.chat.completions.create(**kwargs)
+        return response.choices[0].message.content or ""
 
-import "./BaseTestWithBalanceLog.sol";
+    @staticmethod
+    def _clean_solidity(response: str) -> str:
+        match = re.search(r"```(?:solidity)?\s*([\s\S]*?)\s*```", response)
+        return (match.group(1) if match else response).strip()
 
-// @KeyInfo - Vulnerability: {vuln_type}
-// Affected Functions: {', '.join(affected_functions)}
-// This test demonstrates the vulnerability found in the analyzed contract for educational purposes only
+    @staticmethod
+    def _without_comments(text: str) -> str:
+        return re.sub(r"//.*?$|/\*[\s\S]*?\*/", "", text, flags=re.M).strip()
 
-contract {vuln_type}ExploitTest is BaseTestWithBalanceLog {{
-    // For forking Ethereum mainnet
-    uint256 blockNumber = 18000000; // Recent Ethereum block
+    @staticmethod
+    def _braces_match(code: str) -> bool:
+        stripped = GeneratorAgent._without_comments(re.sub(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'', '""', code))
+        depth = 0
+        for char in stripped:
+            if char == "{": depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth < 0: return False
+        return depth == 0
 
-    function setUp() public {{
-        // Setup the fork
-        vm.createSelectFork("mainnet", blockNumber);
-
-        // Fund testing account with plenty of ETH for operations
-        vm.deal(address(this), 100 ether);
-
-        // Deploy any needed contracts for the demonstration
-        // TODO: Implement setup based on vulnerability type
-    }}
-
-    function testExploit() public balanceLog {{
-        console.log("Starting {vuln_type} vulnerability demonstration");
-
-        // EDUCATIONAL NOTE: This test demonstrates how the {vuln_type} vulnerability can manifest
-        // in smart contracts and how developers can protect against it.
-
-        // TODO: Implement the exploit based on the plan
-        // Setup steps:
-        // {self._parse_steps(exploit_plan.get("setup_steps", []))}
-
-        // Execution steps:
-        // {self._parse_steps(exploit_plan.get("execution_steps", []))}
-
-        // SECURITY BEST PRACTICE: Always handle errors from external calls and check return values
-
-        // Validation steps:
-        // {self._parse_steps(exploit_plan.get("validation_steps", []))}
-
-        // MITIGATION STRATEGIES:
-        // 1. Always follow the checks-effects-interactions pattern
-        // 2. Use OpenZeppelin's security tools and libraries
-        // 3. Get multiple professional audits before deploying important contracts
-    }}
-}}
-"""
+    @staticmethod
+    def _function_body(code: str, name: str) -> str:
+        match = re.search(rf"\bfunction\s+{re.escape(name)}\s*\([^)]*\)[^{{]*{{", code)
+        if not match: return ""
+        start, depth = match.end(), 1
+        for index in range(start, len(code)):
+            if code[index] == "{": depth += 1
+            elif code[index] == "}":
+                depth -= 1
+                if depth == 0: return code[start:index]
+        return ""
 
     def generate_basetest_file(self) -> str:
-        """
-        Generate the BaseTestWithBalanceLog.sol file needed for the PoC to work
-        """
-        os.makedirs("exploit", exist_ok=True)
-
-        basetest_content = """// SPDX-License-Identifier: UNLICENSED
+        self.test_dir.mkdir(parents=True, exist_ok=True)
+        filename = self.test_dir / "basetest.sol"
+        if not filename.exists():
+            filename.write_text("""// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.15;
-
-import "forge-std/Test.sol";
-
+import \"forge-std/Test.sol\";
 contract BaseTestWithBalanceLog is Test {
-    // Change this to the target token to get token balance of
-    // Keep it address 0 if its ETH that is gotten at the end of the exploit
-    address fundingToken = address(0);
-
-    struct ChainInfo {
-        string name;
-        string symbol;
-    }
-
-    mapping(uint256 => ChainInfo) private chainIdToInfo;
-
-    constructor() {
-        chainIdToInfo[1] = ChainInfo("MAINNET", "ETH");
-        chainIdToInfo[238] = ChainInfo("BLAST", "ETH");
-        chainIdToInfo[10] = ChainInfo("OPTIMISM", "ETH");
-        chainIdToInfo[250] = ChainInfo("FANTOM", "FTM");
-        chainIdToInfo[42_161] = ChainInfo("ARBITRUM", "ETH");
-        chainIdToInfo[56] = ChainInfo("BSC", "BNB");
-        chainIdToInfo[1285] = ChainInfo("MOONRIVER", "MOVR");
-        chainIdToInfo[100] = ChainInfo("GNOSIS", "XDAI");
-        chainIdToInfo[43_114] = ChainInfo("AVALANCHE", "AVAX");
-        chainIdToInfo[137] = ChainInfo("POLYGON", "MATIC");
-        chainIdToInfo[42_220] = ChainInfo("CELO", "CELO");
-        chainIdToInfo[8453] = ChainInfo("BASE", "ETH");
-    }
-
-    function getChainInfo(
-        uint256 chainId
-    ) internal view returns (string memory, string memory) {
-        ChainInfo storage info = chainIdToInfo[chainId];
-        return (info.name, info.symbol);
-    }
-
-    function getChainSymbol(
-        uint256 chainId
-    ) internal view returns (string memory symbol) {
-        (, symbol) = getChainInfo(chainId);
-        // Return ETH as default if chainID is not registered in mapping
-        if (bytes(symbol).length == 0) {
-            symbol = "ETH";
-        }
-    }
-
-    function getFundingBal() internal returns (uint256) {
-        return fundingToken == address(0)
-            ? address(this).balance
-            : TokenHelper.getTokenBalance(fundingToken, address(this));
-    }
-
-    function getFundingDecimals() internal returns (uint8) {
-        return fundingToken == address(0) ? 18 : TokenHelper.getTokenDecimals(fundingToken);
-    }
-
-    function getBaseCurrencySymbol() internal returns (string memory) {
-        string memory chainSymbol = getChainSymbol(block.chainid);
-        return fundingToken == address(0) ? chainSymbol : TokenHelper.getTokenSymbol(fundingToken);
-    }
-
-    modifier balanceLog() {
-        // Ensure test contract has some initial ETH (enough to run tests)
-        if (fundingToken == address(0)) {
-            // Deal 0 ETH for logging initial balance, but keep existing ETH
-            uint256 existingBalance = address(this).balance;
-            vm.deal(address(this), 0);
-            logBalance("Before");
-            // Restore original balance plus some extra for test operations
-            vm.deal(address(this), existingBalance + 10 ether);
-        } else {
-            logBalance("Before");
-        }
-
-        _;
-
-        logBalance("After");
-    }
-
-    function logBalance(
-        string memory stage
-    ) private {
-        emit log_named_decimal_uint(
-            string(abi.encodePacked("Attacker ", getBaseCurrencySymbol(), " Balance ", stage, " exploit")),
-            getFundingBal(),
-            getFundingDecimals()
-        );
-    }
+    modifier balanceLog() { _; }
 }
-
-library TokenHelper {
-    function callTokenFunction(
-        address tokenAddress,
-        bytes memory data,
-        bool staticCall
-    ) private returns (bytes memory) {
-        (bool success, bytes memory result) = staticCall ? tokenAddress.staticcall(data) : tokenAddress.call(data);
-        require(success, "Failed to call token function");
-        return result;
-    }
-
-    function getTokenBalance(address tokenAddress, address targetAddress) internal returns (uint256) {
-        bytes memory result =
-            callTokenFunction(tokenAddress, abi.encodeWithSignature("balanceOf(address)", targetAddress), true);
-        return abi.decode(result, (uint256));
-    }
-
-    function getTokenDecimals(
-        address tokenAddress
-    ) internal returns (uint8) {
-        bytes memory result = callTokenFunction(tokenAddress, abi.encodeWithSignature("decimals()"), true);
-        return abi.decode(result, (uint8));
-    }
-
-    function getTokenSymbol(
-        address tokenAddress
-    ) internal returns (string memory) {
-        bytes memory result = callTokenFunction(tokenAddress, abi.encodeWithSignature("symbol()"), true);
-        return abi.decode(result, (string));
-    }
-
-    function approveToken(address token, address spender, uint256 spendAmount) internal returns (bool) {
-        bytes memory result =
-            callTokenFunction(token, abi.encodeWithSignature("approve(address,uint256)", spender, spendAmount), false);
-        return abi.decode(result, (bool));
-    }
-
-    function transferToken(address token, address receiver, uint256 amount) internal returns (bool) {
-        bytes memory result =
-            callTokenFunction(token, abi.encodeWithSignature("transfer(address,uint256)", receiver, amount), false);
-        return abi.decode(result, (bool));
-    }
-}
-"""
-
-        filename = "exploit/src/test/basetest.sol"
-        with open(filename, "w", encoding="utf-8") as f:
-            f.write(basetest_content)
-
-        return filename
+""", encoding="utf-8")
+        return str(filename)

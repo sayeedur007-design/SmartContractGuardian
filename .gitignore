@@ -1,72 +1,94 @@
+# ===========================
 # Virtual Environment
-.venv
+# ===========================
+.venv/
 
-# Environment variables
+# ===========================
+# Environment Variables
+# ===========================
 .env
 
-# Pycache
-static_analysis/scripts/__pycache__
-
-# pyc files
-*.pyc
-
-# Repomix
-repomix-output.txt
-
-# Test files
-static_analysis/test_contracts
-
-frontend_poc/uploads
-
-# Node modules
-node_modules
-static_analysis/test_contracts/sample.sol
-
-# benchmark files
-# benchmark_data
-# benchmark_data_no_errors
-
-# Exploit PoCs
-exploit/src/test
-
-# Logs
-benchmark_evaluation.log
-ctfbench_evaluation.log
-.DS_Store
-token_usage_stats.json
-.DS_Store
-
-# Ignore all Pycache
+# ===========================
+# Python
+# ===========================
+__pycache__/
 **/__pycache__/
-
-# VS Code
-.vscode/
-
-# Python cache
+*.pyc
 .pytest_cache/
 .mypy_cache/
 
-# Build outputs
-build/
-dist/
+# ===========================
+# Node.js
+# ===========================
+node_modules/
 
-# Foundry build artifacts
-exploit/cache/
-exploit/out/
+# ===========================
+# VS Code
+# ===========================
+.vscode/
 
-# Temporary files
+# ===========================
+# Temporary Files
+# ===========================
 *.tmp
 *.temp
 
-# Performance metrics
-performance_metrics_*.json
+# ===========================
+# OS Files
+# ===========================
+.DS_Store
+Thumbs.db
 
+# ===========================
+# Build Outputs
+# ===========================
+build/
+dist/
+
+# ===========================
+# ChromaDB
+# ===========================
+chroma_db/
+*.db
+*.sqlite3
+
+# ===========================
+# Uploads
+# ===========================
+frontend_poc/uploads/
+
+# ===========================
+# Static Analysis Test Contracts
+# ===========================
+static_analysis/test_contracts/
+
+# ===========================
+# Foundry
+# ===========================
+exploit/cache/
+exploit/out/
+exploit/src/test/
+
+# ===========================
+# Logs
+# ===========================
+*.log
+benchmark_evaluation.log
+ctfbench_evaluation.log
+
+# ===========================
 # Reports
+# ===========================
 reports/*.json
 reports/*.md
+performance_metrics_*.json
+token_usage_stats.json
 
-# Jupyter
-.ipynb_checkpoints/
+# ===========================
+# Miscellaneous
+# ===========================
+repomix-output.txt
 
-# Windows
-Thumbs.db
+# Uncomment if you don't want benchmark datasets tracked
+# benchmark_data/
+# benchmark_data_no_errors/

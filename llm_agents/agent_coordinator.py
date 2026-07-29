@@ -126,7 +126,10 @@ class AgentCoordinator:
 
         # 3. Generate PoCs for high-confidence vulnerabilities
         generated_pocs = []
-        high_conf_vulns = [v for v in rechecked_vulns if float(v.get("skeptic_confidence", 0)) > 0.5]
+        high_conf_vulns = [
+    v for v in rechecked_vulns
+    if float(v.get("skeptic_confidence", 0)) >= 0.2
+]
 
         # Process high confidence vulnerabilities
         if high_conf_vulns:
@@ -160,6 +163,8 @@ class AgentCoordinator:
                     console.print(f"[dim]Created base file: {base_file}[/dim]")
 
                 # Generate the PoC for this vulnerability
+                # Preserve target metadata so the generator imports the analyzed source by name.
+                plan_data["target_contract"] = contract_info.get("target_contract", {})
                 poc_data = self.generator.generate(plan_data)
 
                 # Run and fix the exploit if auto-run is enabled

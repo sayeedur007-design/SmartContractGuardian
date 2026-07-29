@@ -313,18 +313,15 @@ def analyze_thread(job_id, contract_path, model_config, auto_run_config, use_rag
             'result': f'Analyzed {function_count} functions'
         })
 
-        # Copy contract to exploit/src/VulnerableContract.sol so that PoC test compilation works
+        # Copy with its real filename so generated imports match the analyzed source.
         try:
             import shutil
             root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             exploit_src_dir = os.path.join(root_dir, "exploit", "src")
             os.makedirs(exploit_src_dir, exist_ok=True)
-            shutil.copy2(contract_path, os.path.join(exploit_src_dir, "VulnerableContract.sol"))
-            
-            exploit_src_src_dir = os.path.join(exploit_src_dir, "src")
-            os.makedirs(exploit_src_src_dir, exist_ok=True)
-            shutil.copy2(contract_path, os.path.join(exploit_src_src_dir, "VulnerableContract.sol"))
-            print(f"Copied contract to {exploit_src_dir}/VulnerableContract.sol for compiler visibility")
+            target_filename = os.path.basename(contract_path)
+            shutil.copy2(contract_path, os.path.join(exploit_src_dir, target_filename))
+            print(f"Copied contract to {exploit_src_dir}/{target_filename} for compiler visibility")
         except Exception as copy_err:
             print(f"Warning: Could not copy contract to exploit directory: {copy_err}")
 
@@ -338,6 +335,7 @@ def analyze_thread(job_id, contract_path, model_config, auto_run_config, use_rag
             "call_graph": call_graph,
             "source_code": source_code, # Pass flattened source for main context
             "detector_results": detector_results,
+            "target_contract": {"path": target_filename},
         }
 
         # Add contracts directory for inter-contract analysis if available
@@ -543,7 +541,9 @@ from llm_agents.agents.generator import GeneratorAgent
 
 # Modified version of GeneratorAgent for the frontend
 class FrontendGeneratorAgent(GeneratorAgent):
-    def generate(self, exploit_data):
+    # Retained legacy helpers below are intentionally not overrides: the shared
+    # generator owns validation, self-review, and compile-before-save.
+    def legacy_generate(self, exploit_data):
         """Override parent generate method to use correct paths for frontend"""
         vuln_info = exploit_data.get("vulnerability", {})
         exploit_plan = exploit_data.get("exploit_plan", {})
@@ -576,7 +576,7 @@ class FrontendGeneratorAgent(GeneratorAgent):
             "execution_command": f"forge test -vv --match-path \"{rel_path}\"" # Use quotes for paths with spaces
         }
 
-    def save_poc_locally(self, poc_code: str, vuln_type: str) -> str:
+    def legacy_save_poc_locally(self, poc_code: str, vuln_type: str) -> str:
         """
         Save the generated PoC contract to a file in the main exploit directory
 
@@ -814,7 +814,8 @@ library TokenHelper {
 
 # Modified version of ExploitRunner for the frontend
 class FrontendExploitRunner(ExploitRunner):
-    def _execute_test(self, command: str) -> Tuple[bool, str, str]:
+    # The shared runner captures complete diagnostics and uses safe repair gating.
+    def legacy_execute_test(self, command: str) -> Tuple[bool, str, str]:
         """
         Execute a Foundry test command and capture the output.
         Uses the main exploit directory.
@@ -1273,6 +1274,8 @@ class SocketIOAgentCoordinator(AgentCoordinator):
                     'detail': 'Generating Solidity code to demonstrate the vulnerability'
                 })
 
+                # Preserve target metadata for dynamic imports in the shared generator.
+                plan_data["target_contract"] = contract_info.get("target_contract", {})
                 # Generate the PoC for this vulnerability
                 poc_data = self.generator.generate(plan_data)
                 filename = os.path.basename(poc_data.get('exploit_file', 'Unknown'))

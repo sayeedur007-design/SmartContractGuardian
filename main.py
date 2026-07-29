@@ -182,14 +182,13 @@ def main():
         print_error(f"Contract file not found: {filepath}")
         return
 
-    # Copy the contract file to the exploit directory for compilability of generated PoCs
+    # Copy under its real name so generated imports always match the analyzed target.
     try:
         import shutil
         os.makedirs("exploit/src", exist_ok=True)
-        shutil.copy2(filepath, "exploit/src/VulnerableContract.sol")
-        os.makedirs("exploit/src/src", exist_ok=True)
-        shutil.copy2(filepath, "exploit/src/src/VulnerableContract.sol")
-        print_step("Copied contract to exploit/src/VulnerableContract.sol for compiler visibility")
+        target_filename = os.path.basename(filepath)
+        shutil.copy2(filepath, os.path.join("exploit", "src", target_filename))
+        print_step(f"Copied contract to exploit/src/{target_filename} for compiler visibility")
     except Exception as copy_err:
         print_warning(f"Could not copy contract to exploit directory: {copy_err}")
 
@@ -239,6 +238,7 @@ def main():
         "call_graph": call_graph,
         "source_code": source_code, # Primary file's source code
         "detector_results": detector_results,
+        "target_contract": {"path": target_filename},
     }
 
     # Add contracts directory path if it exists

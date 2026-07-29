@@ -15,6 +15,10 @@ class ModelConfig:
         base_url: Optional[str] = None,
         skip_poc_generation: bool = False,
         export_markdown: bool = False,
+        poc_generation_attempts: int = 3,
+        poc_max_retries: int = 3,
+        forge_build_timeout: int = 120,
+        forge_test_timeout: int = 180,
     ):
         self.analyzer_model = "qwen2.5-coder:7b" if analyzer_model == "ollama" else analyzer_model
         self.skeptic_model = "qwen2.5-coder:7b" if skeptic_model == "ollama" else skeptic_model
@@ -24,6 +28,10 @@ class ModelConfig:
         self.base_url = base_url
         self.skip_poc_generation = skip_poc_generation
         self.export_markdown = export_markdown
+        self.poc_generation_attempts = max(1, poc_generation_attempts)
+        self.poc_max_retries = max(0, poc_max_retries)
+        self.forge_build_timeout = max(1, forge_build_timeout)
+        self.forge_test_timeout = max(1, forge_test_timeout)
 
         self.is_reasoning_model = {
             "qwen2.5-coder:7b": False,
