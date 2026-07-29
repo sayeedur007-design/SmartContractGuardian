@@ -6,6 +6,7 @@ from typing import Dict
 from pathlib import Path
 # Import the new function
 from rag.doc_db import get_vuln_retriever_from_json
+from utils.token_tracker import performance_tracker, token_tracker
 
 # CHANGED: import SkepticAgent
 from .agents.analyzer import AnalyzerAgent
@@ -34,14 +35,21 @@ class AgentCoordinator:
         # Initialize retriever only if RAG is enabled
         # Initialize retriever only if RAG is enabled
         if self.use_rag:
-            PROJECT_ROOT = Path(__file__).resolve().parent.parent
+            try:
+                PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-            self.vuln_retriever = get_vuln_retriever_from_json(
-                json_path=str(PROJECT_ROOT / "known_vulnerabilities" / "contract_vulns.json"),
-                base_dataset_dir=str(PROJECT_ROOT / "known_vulnerabilities"),
-                persist_directory=str(PROJECT_ROOT / "chroma_db"),
-                top_k=3,
-    )
+                self.vuln_retriever = get_vuln_retriever_from_json(
+                    json_path=str(PROJECT_ROOT / "known_vulnerabilities" / "contract_vulns.json"),
+                    base_dataset_dir=str(PROJECT_ROOT / "known_vulnerabilities"),
+                    persist_directory=str(PROJECT_ROOT / "chroma_db"),
+                    top_k=3,
+        )       
+                if self.vuln_retriever is None:
+                    print_warning("RAG unavailable. Continuing without ChromaDB.")
+
+            except Exception as e:
+                print_warning(f"Failed to initialize RAG: {e}")
+                self.vuln_retriever = None
         else:
             self.vuln_retriever = None
 
@@ -114,7 +122,7 @@ class AgentCoordinator:
         performance_tracker.start_stage("skeptic_agent")
         console.print("\n[bold blue]🧐 SkepticAgent: Re-checking vulnerability validity...[/bold blue]")
         rechecked_vulns = self.skeptic.audit_vulnerabilities(
-            contract_info["source_code"], vulnerabilities
+            contract_info["source_code"], vulnerabilities, contract_info.get("function_details", [])
         )
 
         console.print("[bold green]✓ SkepticAgent: Completed verification[/bold green]")
@@ -128,7 +136,7 @@ class AgentCoordinator:
         generated_pocs = []
         high_conf_vulns = [
     v for v in rechecked_vulns
-    if float(v.get("skeptic_confidence", 0)) >= 0.2
+    if float(v.get("skeptic_confidence", 0)) >= 0.6
 ]
 
         # Process high confidence vulnerabilities
@@ -158,7 +166,7 @@ class AgentCoordinator:
                 console.print(f"\n[bold blue]🔧 GeneratorAgent: Creating PoC for {vul.get('vulnerability_type')}...[/bold blue]")
 
                 # First generate the BaseTestWithBalanceLog.sol file if it doesn't exist
-                if not os.path.exists("exploit/src/test/basetest.sol"):
+                if not os.path.exists("exploit/test/basetest.sol"):
                     base_file = self.generator.generate_basetest_file()
                     console.print(f"[dim]Created base file: {base_file}[/dim]")
 

@@ -8,9 +8,7 @@ from pathlib import Path
 
 from langchain.docstore.document import Document
 from langchain.text_splitter import TokenTextSplitter
-from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings
-from chromadb.config import Settings
+
 
 from utils.print_utils import create_progress_bar, print_step
 
@@ -122,26 +120,37 @@ def chunk_contract_with_metadata(
     return documents
 
 def build_chroma_vectorstore_from_json(
+    
     json_path: str,
     base_dataset_dir: str,
     persist_directory: str = "./chroma_db",
 ):
     """
-    Builds a local Chroma vector database from the vulnerability dataset.
-    If the database already exists, it is reused.
+        Builds a local Chroma vector database from the vulnerability dataset.
+        If the database already exists, it is reused.
     """
+    
+    from langchain_chroma import Chroma
+    from langchain_ollama import OllamaEmbeddings
+    from chromadb.config import Settings
+   
 
     print_step("Initializing Local ChromaDB...")
 
-    embeddings = OllamaEmbeddings(
-        model="nomic-embed-text"
-    )
+    try:
+        embeddings = OllamaEmbeddings(
+            model="nomic-embed-text"
+            base_url="http://127.0.0.1:11434"
+        )
 
-    vectorstore = Chroma(
-        persist_directory=persist_directory,
-        embedding_function=embeddings,
-        client_settings=Settings(anonymized_telemetry=False),
-    )
+        vectorstore = Chroma(
+            persist_directory=persist_directory,
+            embedding_function=embeddings,
+            client_settings=Settings(anonymized_telemetry=False),
+        )
+    except Exception as e:
+        print_step(f"Failed to initialize ChromaDB: {e}")
+        return None
 
     try:
         existing = vectorstore.get()
@@ -216,7 +225,12 @@ def build_chroma_vectorstore_from_json(
                 cleaned_metadata[key] = value
         doc.metadata = cleaned_metadata
 
-    vectorstore.add_documents(all_docs)
+    try:
+        vectorstore.add_documents(all_docs)
+
+    except Exception as e:
+        print_step(f"Failed to add documents to ChromaDB: {e}")
+        return None
 
     print_step("Local ChromaDB created successfully.")
 
@@ -235,6 +249,10 @@ def get_vuln_retriever_from_json(
         base_dataset_dir=base_dataset_dir,
         persist_directory=persist_directory,
     )
+
+    if vectorstore is None:
+        print_step("RAG retriever unavailable.")
+        return None
 
     return vectorstore.as_retriever(
         search_kwargs={

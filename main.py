@@ -249,7 +249,15 @@ def main():
     # Run LLM analysis
     performance_tracker.start_stage("llm_analysis")
     print_header("Running LLM Analysis")
-    coordinator = AgentCoordinator(model_config=model_config, use_rag=not args.no_rag)
+    try:
+        coordinator = AgentCoordinator(
+            model_config=model_config,
+            use_rag=not args.no_rag
+        )
+
+    except Exception as e:
+        print_error(f"Failed to initialize AgentCoordinator: {e}")
+        return
 
     # Pass auto-run configuration
     auto_run_config = {
@@ -268,7 +276,15 @@ def main():
         print_step("RAG disabled, analysis will use only current contract code")
 
     # Analyze the contract with all the configured agents
-    results = coordinator.analyze_contract(contract_info, auto_run_config=auto_run_config)
+    try:
+        results = coordinator.analyze_contract(
+            contract_info,
+            auto_run_config=auto_run_config
+        )
+
+    except Exception as e:
+        print_error(f"Analysis failed: {e}")
+        return
 
     # Print results summary
     performance_tracker.start_stage("results_reporting")

@@ -11,6 +11,7 @@ from utils.print_utils import print_warning, create_progress_spinner
 from openai import OpenAI
 from langchain.schema import Document
 from .project_context_llm import ProjectContextLLMAgent
+from utils.function_identifiers import known_function_ids, normalize_affected_functions
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class AnalyzerAgent:
                 progress.update(task, description="Processing results...")
                 vulnerabilities = self._parse_llm_response(response_text)
                 vulnerabilities = self._add_deterministic_findings(vulnerabilities, contract_info)
+                vulnerabilities = self._validate_findings(vulnerabilities, contract_info)
                 self._attach_code_snippets(vulnerabilities, contract_info)
 
                 progress.update(task, completed=True)
@@ -103,7 +105,7 @@ class AnalyzerAgent:
         """Small summary of the user’s contract to retrieve related vulnerabilities."""
         lines = []
         for fn in contract_info.get("function_details", []):
-            lines.append(f"Function {fn['function']} calls {fn['called_functions']}")
+            lines.append(f"Function {fn['function_id']} calls {fn['called_functions']}")
         return "\n".join(lines)
 
     @staticmethod
@@ -114,38 +116,62 @@ class AnalyzerAgent:
         findings = [item for item in vulnerabilities if item.get("vulnerability_type") != "unknown"]
 
         rules = [
-            ("reentrancy", r"\.call\s*\{[^}]*value\s*:", "withdraw", "High",
+            ("reentrancy", r"\.call\s*\{[^}]*value\s*:", "High",
              "External value transfer occurs before the balance is reduced.",
              "Apply checks-effects-interactions and use a reentrancy guard."),
-            ("access_control", r"function\s+changeOwner\s*\([^)]*\)\s+external\s*\{", "changeOwner", "High",
+            ("access_control", r"function\s+changeOwner\s*\([^)]*\)\s+external\s*\{", "High",
              "Ownership can be changed by any external caller.",
              "Restrict ownership changes with an onlyOwner modifier and validate the new owner."),
-            ("timestamp_dependence", r"block\.timestamp", "withdrawAfterUnlock", "Medium",
+            ("timestamp_dependence", r"block\.timestamp", "Medium",
              "Unlock logic relies on a miner-influenced block timestamp.",
              "Avoid tight timestamp guarantees; document tolerance or use a safer time design."),
-            ("integer_overflow", r"unchecked\s*\{[\s\S]*?\+=", "reward", "High",
+            ("integer_overflow", r"unchecked\s*\{[\s\S]*?\+=", "High",
              "Unchecked arithmetic can wrap balances in Solidity 0.8+.",
              "Remove unchecked or validate the addition before updating the balance."),
-            ("dangerous_selfdestruct", r"selfdestruct\s*\(", "destroy", "High",
+            ("dangerous_selfdestruct", r"selfdestruct\s*\(", "High",
              "A publicly reachable selfdestruct can permanently disable the contract.",
              "Remove selfdestruct or strictly protect it with appropriate authorization."),
-            ("denial_of_service", r"for\s*\([^)]*;[^)]*\.length[\s\S]*?\.transfer\s*\(", "distribute", "Medium",
+            ("denial_of_service", r"for\s*\([^)]*;[^)]*\.length[\s\S]*?\.transfer\s*\(", "Medium",
              "Unbounded iteration with transfers can exceed gas limits or revert as recipients grow.",
              "Use pull payments or process recipients in bounded batches."),
         ]
-        for vuln_type, pattern, function, severity, reasoning, remediation in rules:
+        for vuln_type, pattern, severity, reasoning, remediation in rules:
             if vuln_type not in existing and re.search(pattern, source, re.IGNORECASE):
+                affected = [
+                    detail["function_id"]
+                    for detail in contract_info.get("function_details", [])
+                    if re.search(pattern, detail.get("content") or "", re.IGNORECASE)
+                ]
+                if not affected:
+                    continue
                 findings.append({
                     "vulnerability_type": vuln_type,
                     "confidence_score": 0.95,
                     "reasoning": reasoning,
-                    "affected_functions": [function],
+                    "affected_functions": affected,
                     "impact": severity,
                     "severity": severity,
                     "remediation": remediation,
                     "exploitation_scenario": "Confirmed by deterministic source-pattern analysis.",
                 })
         return findings
+
+    @staticmethod
+    def _validate_findings(vulnerabilities: list, contract_info: Dict) -> list:
+        """Drop hallucinations instead of allowing them into the skeptic stage."""
+        allowed = known_function_ids(contract_info.get("function_details", []))
+        validated = []
+        for finding in vulnerabilities:
+            if not isinstance(finding, dict) or not finding.get("vulnerability_type"):
+                continue
+            affected = normalize_affected_functions(finding.get("affected_functions", []), allowed)
+            # A source-level finding must identify an exact analyzed function.
+            if not affected:
+                logger.warning("Dropping finding %r with unknown affected functions %r", finding.get("vulnerability_type"), finding.get("affected_functions"))
+                continue
+            finding["affected_functions"] = affected
+            validated.append(finding)
+        return validated
 
     def _summarize_detector_results(self, detector_results) -> str:
         """
@@ -189,7 +215,7 @@ class AnalyzerAgent:
         # Summarize user contract
         summary = "=== USER CONTRACT SUMMARY ===\n"
         for fn in contract_info.get("function_details", []):
-            summary += f"- Function {fn['function']} (visibility={fn['visibility']}), calls={fn['called_functions']}\n"
+            summary += f"- Function {fn['function_id']} (visibility={fn['visibility']}), modifiers={fn.get('modifiers', [])}, calls={fn['called_functions']}\n"
 
         # Add known vulnerability snippets
         snippet_text = "\n=== KNOWN VULNERABILITY SNIPPETS ===\n"
@@ -287,7 +313,7 @@ Format findings as:
       "vulnerability_type": "EXACT_CATEGORY_NAME",
       "confidence_score": 0.0-1.0,
       "reasoning": "Detailed analysis showing why this is a vulnerability",
-      "affected_functions": ["..."],
+      "affected_functions": ["EXACT_FUNCTION_ID_FROM_USER_CONTRACT_SUMMARY"],
       "impact": "Specific consequences if exploited",
       "exploitation_scenario": "Step-by-step realistic attack scenario"
   }, ...]

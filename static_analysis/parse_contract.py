@@ -10,6 +10,7 @@ from pathlib import Path
 import json
 import os
 from .extract_contracts import process_contract_file
+from utils.function_identifiers import canonical_function_id
 
 
 def analyze_contract(filepath: str):
@@ -22,11 +23,12 @@ def analyze_contract(filepath: str):
     # previous absolute macOS path made Slither fail on every other machine.
     project_root = Path(__file__).resolve().parent.parent
     openzeppelin_dir = project_root / "node_modules" / "@openzeppelin"
-    solc_remaps = (
-        [f"@openzeppelin={openzeppelin_dir.as_posix()}"]
-        if openzeppelin_dir.is_dir()
-        else []
-    )
+    solc_remaps = []
+    if openzeppelin_dir.is_dir():
+        solc_remaps.append(f"@openzeppelin={openzeppelin_dir.as_posix()}")
+    forge_std_dir = project_root / "exploit" / "lib" / "forge-std" / "src"
+    if forge_std_dir.is_dir():
+        solc_remaps.append(f"forge-std={forge_std_dir.as_posix()}")
     
     # Preprocess the contract file - check if it's a JSON bundle and extract if needed
     temp_dir = None
@@ -57,28 +59,45 @@ def analyze_contract(filepath: str):
     cfg_data = printer.get_call_graph_content()
     all_function_details = []
     call_graph = cfg_data
+    analysis_path = Path(filepath).resolve()
+    analysis_root = analysis_path if analysis_path.is_dir() else analysis_path.parent
 
     # Iterate over each contract in the source
     for contract in slither.contracts:
         contract_name = contract.name
+        source_mapping = contract.source_mapping
+        source_file = (
+            getattr(getattr(source_mapping, "filename", None), "absolute", None)
+            if source_mapping
+            else None
+        )
+        if source_file:
+            source_path = Path(source_file).resolve()
+            in_scope = source_path.is_relative_to(analysis_root) if analysis_path.is_dir() else source_path == analysis_path
+            if not in_scope:
+                continue
 
         # Iterate over each function in the contract
-        for func in contract.functions:
+        # `functions` includes every inherited forge-std helper.  Only direct
+        # declarations belong to the contract being audited.
+        for func in contract.functions_declared:
             # Extract basic function info
             func_name = func.name
             # Exclude function if func_name == constructor
-            if func_name == "slitherConstructorVariables":
+            if func_name.startswith("slitherConstructor"):
                 continue
 
             visibility = str(func.visibility)  # e.g. 'public', 'external', ...
-            if visibility == "internal":
-                continue
             parameters = [(str(p.type), p.name) for p in func.parameters]
             returns = [(str(r.type), r.name) for r in func.returns]
 
             # Lines of code (start_line, end_line). Not all functions have source mappings, handle None carefully.
-            start_line = func.source_mapping.start if func.source_mapping else None
-            end_line = func.source_mapping.end if func.source_mapping else None
+            # Slither's `start`/`end` are character offsets, not source-line
+            # numbers.  Use its line mapping so reports and prompts point to
+            # the correct Solidity locations.
+            lines = func.source_mapping.lines if func.source_mapping else []
+            start_line = min(lines) if lines else None
+            end_line = max(lines) if lines else None
 
             # Get functions being called
             called_functions = [
@@ -91,12 +110,14 @@ def analyze_contract(filepath: str):
             func_detail = {
                 "contract": contract_name,
                 "function": func_name,
+                "function_id": canonical_function_id(func_name, parameters),
                 "visibility": visibility,
                 "parameters": parameters,
                 "returns": returns,
                 "start_line": start_line,
                 "end_line": end_line,
                 "called_functions": called_functions,
+                "modifiers": [modifier.name for modifier in func.modifiers],
                 "content": func.source_mapping.content if func.source_mapping else None,
             }
 

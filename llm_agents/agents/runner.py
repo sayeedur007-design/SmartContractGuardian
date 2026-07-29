@@ -1,6 +1,7 @@
 """Reliable Foundry execution and compiler-diagnostic repair loop."""
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -61,7 +62,20 @@ class ExploitRunner:
     def _execute_test(self, path: Path, attempt: int) -> Tuple[bool, str]:
         relative = path.resolve().relative_to(self.exploit_root.resolve()).as_posix()
         try:
-            result = subprocess.run(["forge", "test", "-vv", "--match-path", f"./{relative}"], cwd=self.exploit_root, capture_output=True, text=True, timeout=self.model_config.forge_test_timeout)
+            command = ["forge", "test", "-vv", "--no-cache", "--match-path", f"./{relative}"]
+            solc = shutil.which("solc")
+            if solc:
+                command.extend(["--use", solc])
+            result = subprocess.run(
+                command,
+                cwd=self.exploit_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.model_config.forge_test_timeout,
+                env=GeneratorAgent._forge_env(),
+            )
             output = (result.stdout or "") + ("\n" if result.stdout and result.stderr else "") + (result.stderr or "")
         except (OSError, subprocess.TimeoutExpired) as exc:
             output, result = f"Unable to execute forge test: {exc}", None

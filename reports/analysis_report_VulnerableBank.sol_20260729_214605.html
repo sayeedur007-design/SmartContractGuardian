@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Contract Vulnerability Analysis Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <style>
+        :root {
+            --bg-main: #0f172a;
+            --bg-card: #1e293b;
+            --bg-accent: #334155;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --primary: #4f46e5;
+            --primary-gradient: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+            --border: #475569;
+            
+            --high-conf: #ef4444;
+            --med-conf: #f59e0b;
+            --low-conf: #10b981;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            line-height: 1.6;
+        }
+        
+        header {
+            background: var(--primary-gradient);
+            padding: 2rem;
+            color: white;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            margin-bottom: 2rem;
+        }
+        
+        .header-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header-title h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            color: white;
+        }
+        
+        .header-title p {
+            font-size: 0.95rem;
+            color: rgba(255, 255, 255, 0.9);
+        }
+        
+        .main-container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2.5rem;
+        }
+        
+        .stat-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+        }
+        
+        .stat-card .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+        
+        .stat-card .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+        
+        .stat-card.accent {
+            border-left: 4px solid var(--primary);
+        }
+        
+        .report-layout {
+            display: grid;
+            grid-template-columns: 350px 1fr;
+            gap: 2rem;
+            margin-bottom: 3rem;
+            align-items: start;
+        }
+        
+        .sidebar {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.25rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }
+        
+        .sidebar h2 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-main);
+        }
+        
+        .sidebar-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        
+        .sidebar-item {
+            padding: 1rem;
+            background-color: var(--bg-accent);
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: background-color 0.2s, border-color 0.2s;
+            border: 1px solid transparent;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .sidebar-item:hover {
+            background-color: #475569;
+        }
+        
+        .sidebar-item.active {
+            background-color: var(--primary);
+            border-color: var(--primary);
+        }
+        
+        .sidebar-title {
+            font-weight: 500;
+            font-size: 0.9rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 70%;
+        }
+        
+        .badge {
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            text-transform: uppercase;
+        }
+        
+        .conf-high { background-color: var(--high-conf); color: white; }
+        .conf-medium { background-color: var(--med-conf); color: black; }
+        .conf-low { background-color: var(--low-conf); color: white; }
+        
+        .content-panel {
+            min-height: 500px;
+        }
+        
+        .vuln-details-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+            animation: fadeIn 0.3s ease-in-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .details-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .details-header h3 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+        
+        .details-body {
+            padding: 1.5rem;
+        }
+        
+        .meta-section {
+            margin-bottom: 1.5rem;
+            font-size: 0.95rem;
+            background-color: var(--bg-accent);
+            padding: 1rem;
+            border-radius: 0.5rem;
+        }
+        
+        .tabs-container {
+            margin-top: 1.5rem;
+        }
+        
+        .tab-buttons {
+            display: flex;
+            border-bottom: 2px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        
+        .tab-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            padding: 0.75rem 1.5rem;
+            font-size: 0.95rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: color 0.2s, border-bottom-color 0.2s;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+        }
+        
+        .tab-btn:hover {
+            color: var(--text-main);
+        }
+        
+        .tab-btn.active {
+            color: var(--text-main);
+            border-bottom: 2px solid var(--primary);
+            font-weight: 600;
+        }
+        
+        .detail-tab-content h4 {
+            font-size: 1.1rem;
+            margin: 1.5rem 0 0.75rem;
+            border-bottom: 1px dashed var(--border);
+            padding-bottom: 0.25rem;
+            color: var(--text-main);
+        }
+        
+        .detail-tab-content h4:first-child {
+            margin-top: 0;
+        }
+        
+        .reasoning-text {
+            font-size: 0.95rem;
+            color: #cbd5e1;
+            margin-bottom: 1.5rem;
+            white-space: pre-line;
+        }
+        
+        pre {
+            background-color: #0b0f19 !important;
+            border: 1px solid var(--border);
+            border-radius: 0.5rem;
+            padding: 1rem !important;
+            overflow-x: auto;
+            margin-bottom: 1.5rem;
+        }
+        
+        code {
+            font-family: 'Fira Code', monospace;
+            font-size: 0.85rem !important;
+        }
+        
+        .exploit-plan h5 {
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            margin: 1rem 0 0.5rem;
+        }
+        
+        .exploit-plan ul {
+            list-style-type: none;
+            padding-left: 0;
+        }
+        
+        .exploit-plan li {
+            position: relative;
+            padding-left: 1.5rem;
+            margin-bottom: 0.5rem;
+            font-size: 0.95rem;
+        }
+        
+        .exploit-plan li::before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: var(--primary);
+            font-weight: bold;
+        }
+        
+        .error-box {
+            background-color: #450a0a;
+            border: 1px solid #991b1b;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .error-box h5 {
+            color: #fca5a5;
+            margin-bottom: 0.5rem;
+        }
+        
+        .error-box pre {
+            background-color: #180202 !important;
+            border: 1px solid #7f1d1d;
+            margin-bottom: 0;
+        }
+        
+        .no-poc {
+            color: var(--text-muted);
+            font-style: italic;
+            text-align: center;
+            padding: 2rem;
+        }
+        
+        .empty-state {
+            background-color: var(--bg-card);
+            border: 1px dashed var(--border);
+            border-radius: 0.75rem;
+            padding: 4rem 2rem;
+            text-align: center;
+            color: var(--text-muted);
+        }
+        
+        .recommendations-section {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            margin-bottom: 3rem;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+        }
+        
+        .recommendations-section h2 {
+            font-size: 1.25rem;
+            margin-bottom: 1rem;
+            color: var(--text-main);
+        }
+        
+        .recommendations-section ul {
+            padding-left: 1.5rem;
+        }
+        
+        .recommendations-section li {
+            margin-bottom: 0.75rem;
+            font-size: 0.95rem;
+        }
+        
+        @media (max-width: 900px) {
+            .report-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-container">
+            <div class="header-title">
+                <h1>Smart Contract Vulnerability Analysis Report</h1>
+                <p><strong>Contract:</strong> .\VulnerableBank.sol &nbsp;|&nbsp; <strong>Date:</strong> 2026-07-29 21:46:05</p>
+            </div>
+            <span class="badge" style="background-color: var(--primary); padding: 0.5rem 1rem;">SmartGuard Report</span>
+        </div>
+    </header>
+
+    <main class="main-container">
+        <div class="stats-grid">
+            <div class="stat-card accent">
+                <span class="stat-label">Total Vulnerabilities</span>
+                <span class="stat-value">2</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">High Confidence (>0.70)</span>
+                <span class="stat-value" style="color: var(--high-conf);">1</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">PoCs Generated</span>
+                <span class="stat-value">2</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-label">Successful Exploit Runs</span>
+                <span class="stat-value" style="color: var(--low-conf);">0</span>
+            </div>
+        </div>
+
+        <div class="report-layout">
+            <div class="sidebar">
+                <h2>Vulnerabilities</h2>
+                <div class="sidebar-list">
+        <div class="sidebar-item" onclick="showVulnerability(1)">
+            <span class="sidebar-title">access_control</span>
+            <span class="badge conf-high">Conf: 0.90</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(2)">
+            <span class="sidebar-title">business_logic</span>
+            <span class="badge conf-low">Conf: 0.30</span>
+        </div>
+        </div>
+            </div>
+            
+            <div class="content-panel">
+                
+        <div id="vuln-details-1" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>access_control</h3>
+                <span class="badge conf-high">Confidence: 0.90</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> setValue</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-1')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-1')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-1" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The contract has no access control mechanisms. Any caller can set the value of the public variable without any restriction.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>This function allows any external caller to set the value of 'value' without any access control checks. This could lead to unauthorized changes and potential disruption of the intended business logic if this state variable is used for critical decisions or calculations.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function setValue(uint256 _value) public {
+        value = _value;
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-1" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span></p>
+                <div class='error-box'><h5>Error Output:</h5><pre><code>PoC generation failed after deterministic validation and Forge compilation.</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Deploy a contract with the following code snippet</li><li>Contract Code:
+
+smart contract vulnerable_contract {
+    uint256 public value;
+
+    function setValue(uint256 _value) public {
+        value = _value;
+    }
+}
+</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Call the `setValue` function from account A with a value of 100</li><li>Account A invokes: vulnerable_contract.setValue(100)</li><li>Step 2: Observe the contract state (value should be 100)</li><li>Query value from contract: vulnerable_contract.value should read 100</li><li>Step 3: Call the `setValue` function from account B with a value of 200</li><li>Account B invokes: vulnerable_contract.setValue(200)</li><li>Step 4: Observe the contract state (value should be 200)</li><li>Query value from contract: vulnerable_contract.value should read 200</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: Explain that the contract currently lacks access control mechanisms</li><li>Any account can call `setValue` and modify the public variable without restriction</li><li>Step 2: Show how developers can fix this vulnerability by introducing an access control mechanism such as using modifiers to restrict function calls only to specific accounts (e.g., the contract owner)</li><li>Example of fixed code:
+
+smart contract secure_contract {
+    address public owner;
+    uint256 public value;
+
+    constructor() payble {
+        owner = msg.sender;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, 'Not the owner.');
+        _;
+    }
+
+    function setValue(uint256 _value) public onlyOwner {
+        value = _value;
+    }
+}
+</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-2" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>business_logic</h3>
+                <span class="badge conf-low">Confidence: 0.30</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> setValue</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-2')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-2')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-2" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The contract provides a public function to set any value without any validation or checks. This could lead to unexpected behavior or be exploited for gaming purposes.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>This function does not directly manipulate any significant business logic; it merely sets a value. Without additional context, it's unclear if this function itself is problematic. However, the lack of access control (already flagged in vulnerability #0) could make this function easier to exploit if combined with other vulnerabilities.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function setValue(uint256 _value) public {
+        value = _value;
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-2" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span></p>
+                <div class='error-box'><h5>Error Output:</h5><pre><code>PoC generation failed after deterministic validation and Forge compilation.</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Create a Solidity smart contract with the vulnerable `setValue` function.</li><li>Step 2: Deploy the contract on a local Ethereum testnet (e.g., using Ganache).</li><li>Step 3: Create several accounts to simulate different users interacting with the contract.</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Interact with the `setValue` function as a user account and set a value.</li><li>Step 2: Interact with the `setValue` function again but intentionally provide an unexpected large value or a negative number to demonstrate potential misuse of the function.</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: Explain that setting any value without validation exposes the contract to potential business logics issues, such as gaming or manipulation.</li><li>Step 2: Show how developers can fix this vulnerability by adding checks, e.g., `require(_value >= 0);` inside the function to ensure only non-negative values are accepted.</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+            </div>
+        </div>
+
+        <div class="recommendations-section">
+            <h2>Remediation & Recommendations</h2>
+            <ul>
+                <li><strong>Access Control:</strong> Use modifiers (e.g. <code>onlyOwner</code>), check roles properly.</li><li><strong>General:</strong> Conduct thorough testing and consider professional audits.</li>
+            </ul>
+        </div>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+    <script>
+        function showVulnerability(index) {
+            // Hide all detail cards
+            document.querySelectorAll('.vuln-details-card').forEach(card => {
+                card.style.display = 'none';
+            });
+            // Remove active class from all sidebar items
+            document.querySelectorAll('.sidebar-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            
+            // Show target card
+            const targetCard = document.getElementById('vuln-details-' + index);
+            if (targetCard) {
+                targetCard.style.display = 'block';
+            }
+            // Add active class to clicked sidebar item
+            const items = document.querySelectorAll('.sidebar-item');
+            if (items[index - 1]) {
+                items[index - 1].classList.add('active');
+            }
+        }
+
+        function switchDetailTab(event, tabId) {
+            const container = event.currentTarget.closest('.tabs-container');
+            // Hide all tab content under this container
+            container.querySelectorAll('.detail-tab-content').forEach(content => {
+                content.style.display = 'none';
+            });
+            // Deactivate all tab buttons under this container
+            container.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Show target tab content
+            document.getElementById(tabId).style.display = 'block';
+            // Activate current tab button
+            event.currentTarget.classList.add('active');
+        }
+
+        // Initialize view by showing first vulnerability
+        document.addEventListener('DOMContentLoaded', () => {
+            if (2 > 0) {
+                showVulnerability(1);
+            }
+        });
+    </script>
+</body>
+</html>

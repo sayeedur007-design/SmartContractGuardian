@@ -1,4 +1,10 @@
 from typing import Dict, Optional, Tuple
+from dotenv import load_dotenv
+
+# Agents are also used by the Flask application and utility scripts, not only
+# through main.py.  Load the project environment at the shared configuration
+# boundary so those supported entry points receive the same Ollama settings.
+load_dotenv()
 
 class ModelConfig:
     """

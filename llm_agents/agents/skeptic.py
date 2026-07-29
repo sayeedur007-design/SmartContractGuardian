@@ -6,6 +6,7 @@ import json
 from openai import OpenAI
 import re
 from utils.print_utils import create_progress_spinner, print_warning
+from utils.function_identifiers import known_function_ids, normalize_affected_functions
 
 class SkepticAgent:
     """
@@ -28,7 +29,17 @@ class SkepticAgent:
             **self.model_config.get_openai_args(self.model_name)
         )
 
-    def audit_vulnerabilities(self, contract_source: str, vulnerabilities: list) -> list:
+    def audit_vulnerabilities(self, contract_source: str, vulnerabilities: list, function_details: list = None) -> list:
+        if not vulnerabilities:
+            return []
+
+        allowed = known_function_ids(function_details or [])
+        if allowed:
+            vulnerabilities = [
+                {**finding, "affected_functions": normalize_affected_functions(finding.get("affected_functions", []), allowed)}
+                for finding in vulnerabilities
+            ]
+            vulnerabilities = [finding for finding in vulnerabilities if finding["affected_functions"]]
         if not vulnerabilities:
             return []
 
@@ -130,20 +141,24 @@ class SkepticAgent:
             rechecked = self._parse_response(text_out)
 
             # Update vulnerabilities with skeptic results
+            accepted = []
             for item in rechecked:
                 idx = item.get("original_idx")
                 if idx is not None and 0 <= idx < len(vulnerabilities):
-                    vulnerabilities[idx]["skeptic_confidence"] = item.get(
-                        "skeptic_confidence", 0.0
-                    )
-                    vulnerabilities[idx]["validity_reasoning"] = item.get(
-                        "validity_reasoning", ""
-                    )
+                    confidence = float(item.get("skeptic_confidence", 0.0))
+                    # Findings below this value are rejected, not retained as
+                    # low-confidence noise for the exploiter/generator.
+                    if confidence < 0.6:
+                        continue
+                    finding = vulnerabilities[idx]
+                    finding["skeptic_confidence"] = confidence
+                    finding["validity_reasoning"] = item.get("validity_reasoning", "")
+                    accepted.append(finding)
 
 
             progress.update(task, completed=True)
 
-        return sorted(vulnerabilities, key=lambda x: x.get("skeptic_confidence", 0), reverse=True)
+        return sorted(accepted, key=lambda x: x.get("skeptic_confidence", 0), reverse=True)
 
     def _parse_response(self, text_out: str) -> list:
         from utils.json_cleaner import parse_json_safely

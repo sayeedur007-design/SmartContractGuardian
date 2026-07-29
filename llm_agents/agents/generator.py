@@ -1,6 +1,7 @@
 """Foundry PoC generation with deterministic validation and compile gating."""
 import os
 import re
+import shutil
 import subprocess
 import time
 import uuid
@@ -10,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from openai import OpenAI
 
 from utils.print_utils import print_success, print_warning
+from utils.function_identifiers import canonical_function_id
 
 
 class GeneratorAgent:
@@ -29,7 +31,9 @@ class GeneratorAgent:
         )
         self.project_root = Path.cwd()
         self.exploit_root = self.project_root / "exploit"
-        self.test_dir = self.exploit_root / "src" / "test"
+        # Keep generated tests in Foundry's dedicated test directory.  Putting
+        # them below ``src`` makes every old PoC part of all future builds.
+        self.test_dir = self.exploit_root / "test"
 
     def generate(self, exploit_data: Dict) -> Dict:
         """Generate, validate, self-review, compile, then persist a PoC."""
@@ -84,6 +88,13 @@ class GeneratorAgent:
     ) -> str:
         affected = ", ".join(self._extract_relevant_functions(vulnerability)) or "not specified"
         previous_failures = "None (first attempt)." if not failures else "\n".join(f"- {item}" for item in failures)
+        target_import = f'import "../src/{target["filename"]}";'
+        target_type = target["contract_name"]
+        if target_type == "Test":
+            # forge-std exports Test, so importing a target contract named Test
+            # without an alias makes every generated PoC uncompilable.
+            target_import = f'import {{Test as VulnerableBankTarget}} from "../src/{target["filename"]}";'
+            target_type = "VulnerableBankTarget"
         prompt = f"""ROLE
 You are a Solidity security engineer writing one self-contained, defensive Foundry regression test.
 
@@ -102,11 +113,13 @@ Previous attempt feedback (attempt {attempt}):
 
 STRICT REQUIREMENTS
 - Include SPDX and pragma solidity.
-- Import exactly `./basetest.sol` and `../{target['filename']}`.
+- Import `./basetest.sol` and this target import exactly: `{target_import}`.
 - Declare a test contract inheriting `BaseTestWithBalanceLog`.
 - Include non-empty `setUp()` and `testExploit()` functions.
 - `testExploit()` must use `balanceLog`; both setup or test must call `vm.deal`.
-- Instantiate or otherwise use `{target['contract_name']}` and call the reported affected function when one is supplied.
+- Use `vm.prank` or `vm.startPrank` for the attacker and include at least one
+  Foundry assertion proving the claimed impact.
+- Instantiate or otherwise use `{target_type}` and call the reported affected function when one is supplied.
 - Use only contracts/interfaces declared in this file or the two imports. Do not use placeholders, TODOs, ellipses, or fork RPCs.
 - Rewrite the entire contract; do not patch a prior response.
 
@@ -125,7 +138,7 @@ RETURN ONLY SOLIDITY
         imports = re.findall(r"^\s*import\s+(?:[^\"']+from\s+)?[\"']([^\"']+)[\"']\s*;", code, re.M)
         if "./basetest.sol" not in imports:
             errors.append("missing basetest import")
-        expected_import = f"../{target['filename']}"
+        expected_import = f"../src/{target['filename']}"
         if expected_import not in imports:
             errors.append(f"missing target import {expected_import}")
         if re.search(r"\b(TODO|placeholder|fill\s+here)\b|\.\.\.", code, re.I):
@@ -147,6 +160,10 @@ RETURN ONLY SOLIDITY
             errors.append("testExploit does not use balanceLog")
         if "vm.deal" not in code:
             errors.append("missing vm.deal")
+        if not re.search(r"\bvm\.(?:prank|startPrank)\s*\(", code):
+            errors.append("missing vm.prank or vm.startPrank")
+        if not re.search(r"\bassert(?:Eq|True|False|Gt|Lt|Ge|Le)\s*\(", code):
+            errors.append("missing Foundry assertion")
         if not re.search(rf"\b{re.escape(target['contract_name'])}\b", code):
             errors.append("target contract name is not used")
         source_functions = set(target.get("functions", []))
@@ -154,8 +171,10 @@ RETURN ONLY SOLIDITY
         for function in affected:
             if source_functions and function not in source_functions:
                 errors.append(f"reported affected function does not exist: {function}")
-            elif source_functions and not re.search(rf"\.\s*{re.escape(function)}\s*\(", code):
-                errors.append(f"PoC does not call affected function: {function}")
+            elif source_functions:
+                function_name = function.split("(", 1)[0]
+                if not re.search(rf"\.\s*{re.escape(function_name)}\s*\(", code):
+                    errors.append(f"PoC does not call affected function: {function}")
         return errors
 
     def compile_candidate(self, code: str) -> Tuple[bool, str]:
@@ -165,12 +184,23 @@ RETURN ONLY SOLIDITY
         try:
             temporary.write_text(code, encoding="utf-8")
             relative = temporary.relative_to(self.exploit_root).as_posix()
+            # `forge build --contracts` still writes compiler signatures on
+            # some Windows nightly builds, even with --no-cache.  Running the
+            # isolated test path validates the same compilation unit without
+            # touching the global Foundry cache.
+            command = ["forge", "test", "--no-cache", "--match-path", f"./{relative}"]
+            solc = shutil.which("solc")
+            if solc:
+                command.extend(["--use", solc])
             result = subprocess.run(
-                ["forge", "build", "--force", "--contracts", relative],
+                command,
                 cwd=self.exploit_root,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self.model_config.forge_build_timeout,
+                env=self._forge_env(),
             )
             output = (result.stdout or "") + ("\n" if result.stdout and result.stderr else "") + (result.stderr or "")
             return result.returncode == 0, output
@@ -215,7 +245,15 @@ RETURN ONLY SOLIDITY
 
     @staticmethod
     def _source_functions(source: str) -> List[str]:
-        return re.findall(r"\bfunction\s+([A-Za-z_]\w*)\s*\(", source)
+        functions = []
+        for name, raw_params in re.findall(r"\bfunction\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", source):
+            types = []
+            for raw_param in filter(None, (part.strip() for part in raw_params.split(","))):
+                tokens = [token for token in raw_param.split() if token not in {"memory", "storage", "calldata", "payable"}]
+                if tokens:
+                    types.append(tokens[0])
+            functions.append(canonical_function_id(name, types))
+        return functions
 
     @staticmethod
     def _extract_relevant_functions(vulnerability: Dict) -> List[str]:
@@ -223,7 +261,7 @@ RETURN ONLY SOLIDITY
         return [str(value).split(".")[-1] for value in values if str(value).strip()]
 
     def _self_review(self, code: str, vulnerability: Dict, target: Dict) -> str:
-        prompt = f"""Review this Solidity Foundry test. Answer exactly PASS, or FAIL: followed by one concrete compilation/rule violation. It must import ./basetest.sol and ../{target['filename']}, inherit BaseTestWithBalanceLog, use balanceLog and vm.deal, and exercise {target['contract_name']} for {self._extract_relevant_functions(vulnerability)}.\n\n{code}"""
+        prompt = f"""Review this Solidity Foundry test. Answer exactly PASS, or FAIL: followed by one concrete compilation/rule violation. It must import ./basetest.sol and ../src/{target['filename']}, inherit BaseTestWithBalanceLog, use balanceLog and vm.deal, and exercise {target['contract_name']} for {self._extract_relevant_functions(vulnerability)}.\n\n{code}"""
         try:
             response = self._chat(prompt).strip()
         except Exception as exc:
@@ -238,6 +276,21 @@ RETURN ONLY SOLIDITY
             kwargs.update(max_tokens=64000, extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}})
         response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
+
+    @staticmethod
+    def _forge_env() -> Dict[str, str]:
+        """Give Foundry a Windows home directory when invoked from a service."""
+        env = os.environ.copy()
+        home = env.get("HOME") or env.get("USERPROFILE") or str(Path.home())
+        # svm-rs uses the Windows profile variables while other Foundry
+        # components use HOME.  A service process can omit either set.
+        env["HOME"] = home
+        env["USERPROFILE"] = home
+        drive, tail = os.path.splitdrive(home)
+        if drive:
+            env["HOMEDRIVE"] = drive
+            env["HOMEPATH"] = tail or "\\"
+        return env
 
     @staticmethod
     def _clean_solidity(response: str) -> str:

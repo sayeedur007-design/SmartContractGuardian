@@ -373,14 +373,49 @@ def analyze_thread(job_id, contract_path, model_config, auto_run_config, use_rag
             contracts_dir = None # Ensure contracts_dir is None if not applicable
 
         # Initialize agent coordinator using SocketIOAgentCoordinator to emit events
-        coordinator = SocketIOAgentCoordinator(
-            job_id,
-            model_config=model_config,
-            use_rag=use_rag
-        )
+        try:
+            coordinator = SocketIOAgentCoordinator(
+                job_id,
+                model_config=model_config,
+                use_rag=use_rag
+            )
+
+        except Exception as e:
+            jobs[job_id].update({
+                "status": "error",
+                "error": f"Failed to initialize AgentCoordinator: {e}"
+            })
+
+            socketio.emit(
+                "analysis_error",
+                {
+                    "job_id": job_id,
+                    "error": f"Failed to initialize AgentCoordinator: {e}"
+                }
+            )
+            return
 
         # Run the main analysis pipeline
-        results = coordinator.analyze_contract(contract_info, auto_run_config=auto_run_config)
+        try:
+            results = coordinator.analyze_contract(
+                contract_info,
+                auto_run_config=auto_run_config
+            )
+
+        except Exception as e:
+            jobs[job_id].update({
+                "status": "error",
+                "error": str(e)
+            })
+
+            socketio.emit(
+                "analysis_error",
+                {
+                    "job_id": job_id,
+                    "error": str(e)
+                }
+            )
+            return
 
         # Update job status
         jobs[job_id].update({
