@@ -69,11 +69,13 @@ class AnalyzerAgent:
                 progress.update(task, description="Analyzing with LLM...")
                 # Optimized system prompt for local 7B coder model
                 system_prompt = (
-                    "You are an expert smart contract security auditor. Analyze the provided Solidity contract for vulnerabilities.\n"
-                    "Focus on REENTRANCY, ACCESS CONTROL, BUSINESS LOGIC, ARITHMETIC, and DUSK-related issues.\n"
-                    "Return ONLY valid JSON in the specified format. Do not include markdown preamble.\n"
-                    "If you find multiple instances of the same vulnerability type, group them if appropriate but ensure distinct root causes are reported separately.\n"
-                    "Be concise in reasoning. Only report vulnerabilities you are highly confident in."
+                    "You are a source-grounded Solidity security auditor. Return only valid JSON. "
+                    "Perform a structured audit in this exact order: Access Control; External Calls; State Changes; "
+                    "Reentrancy; Arithmetic; Timestamp; Randomness; Business Logic; Denial of Service; Selfdestruct. "
+                    "For every accepted finding, cite the affected function and explain the concrete source-level condition, "
+                    "attacker capability, and impact. Do not infer code, functions, modifiers, or state that is absent from the source. "
+                    "Do not report a category merely because a keyword occurs; report it only when the surrounding logic creates a security-relevant condition. "
+                    "Use exact function IDs from the supplied summary and calibrate confidence conservatively."
                 )
                 try:
                     response_text = self._call_llm(system_prompt, user_prompt)
@@ -102,9 +104,7 @@ class AnalyzerAgent:
 
     def _deduplicate_vulnerabilities(self, vulnerabilities: list) -> list:
         """Remove redundant findings of the same type in the same functions."""
-        unique_findings = []
-        seen = set()
-        
+        merged = {}
         for v in vulnerabilities:
             v_type = v.get("vulnerability_type", "").lower()
             # Sort affected functions for consistent keys
@@ -112,15 +112,27 @@ class AnalyzerAgent:
             # Create a unique key based on type and affected functions
             key = (v_type, tuple(affected))
             
-            if key not in seen:
-                seen.add(key)
-                unique_findings.append(v)
-            else:
-                # If we've seen this type/function combo, maybe update reasoning if the new one is better?
-                # For now, just keep the first one found (usually highest confidence from LLM or deterministic)
-                pass
-                
-        return unique_findings
+            current = merged.get(key)
+            if current is None:
+                merged[key] = dict(v)
+                continue
+            current_confidence = self._confidence_value(current.get("confidence_score"))
+            new_confidence = self._confidence_value(v.get("confidence_score"))
+            stronger, supporting = (v, current) if new_confidence > current_confidence else (current, v)
+            merged[key] = dict(stronger)
+            supporting_reason = str(supporting.get("reasoning", "")).strip()
+            if supporting_reason and supporting_reason not in merged[key].get("reasoning", ""):
+                merged[key]["reasoning"] = (
+                    f"{merged[key].get('reasoning', '').strip()} Supporting evidence: {supporting_reason}"
+                ).strip()
+        return list(merged.values())
+
+    @staticmethod
+    def _confidence_value(value) -> float:
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.0
 
     def _build_query_text(self, contract_info: Dict) -> str:
         """Small summary of the user’s contract to retrieve related vulnerabilities."""
@@ -136,45 +148,33 @@ class AnalyzerAgent:
         existing = {str(item.get("vulnerability_type", "")).lower() for item in vulnerabilities}
         findings = [item for item in vulnerabilities if item.get("vulnerability_type") != "unknown"]
 
+        details = contract_info.get("function_details", [])
         rules = [
-            ("reentrancy", r"\.call\s*\{[^}]*value\s*:", "High",
-             "External value transfer occurs before the balance is reduced.",
-             "Apply checks-effects-interactions and use a reentrancy guard."),
-            ("access_control", r"function\s+changeOwner\s*\([^)]*\)\s+external\s*\{", "High",
-             "Ownership can be changed by any external caller.",
-             "Restrict ownership changes with an onlyOwner modifier and validate the new owner."),
-            ("timestamp_dependence", r"block\.timestamp", "Medium",
-             "Unlock logic relies on a miner-influenced block timestamp.",
-             "Avoid tight timestamp guarantees; document tolerance or use a safer time design."),
-            ("integer_overflow", r"unchecked\s*\{[\s\S]*?\+=", "High",
-             "Unchecked arithmetic can wrap balances in Solidity 0.8+.",
-             "Remove unchecked or validate the addition before updating the balance."),
-            ("dangerous_selfdestruct", r"selfdestruct\s*\(", "High",
-             "A publicly reachable selfdestruct can permanently disable the contract.",
-             "Remove selfdestruct or strictly protect it with appropriate authorization."),
-            ("denial_of_service", r"for\s*\([^)]*;[^)]*\.length[\s\S]*?\.transfer\s*\(", "Medium",
-             "Unbounded iteration with transfers can exceed gas limits or revert as recipients grow.",
-             "Use pull payments or process recipients in bounded batches."),
+            ("reentrancy", 0.95, "High", "Apply checks-effects-interactions and a reentrancy guard.",
+             lambda text: re.search(r"\.call\s*\{[^}]*value\s*:", text, re.I) and re.search(r"\.call[\s\S]*?(?:balances|\w+)\s*\[?[^;]*[-+]?=", text, re.I)),
+            ("access_control", 0.85, "High", "Restrict the privileged operation with an authorization check.",
+             lambda text: re.search(r"function\s+(?:changeOwner|transferOwnership|setOwner)\b", text, re.I) and not re.search(r"onlyOwner|require\s*\([^;]*(?:owner|admin|role)", text, re.I)),
+            ("timestamp_dependence", 0.65, "Medium", "Avoid using miner-influenced time in security-sensitive decisions.",
+             lambda text: re.search(r"block\.timestamp", text) and re.search(r"(?:require|if|keccak|random|winner|payout|transfer|call|=)\s*[\s\S]{0,120}block\.timestamp|block\.timestamp[\s\S]{0,120}(?:require|if|keccak|random|winner|payout|transfer|call|=)", text, re.I)),
+            ("integer_overflow", 0.75, "Medium", "Remove unchecked arithmetic or validate bounds before state updates.",
+             lambda text: re.search(r"unchecked\s*\{[\s\S]*?(?:\+\+|--|\+=|-=|\*=)", text, re.I)),
+            ("dangerous_selfdestruct", 0.80, "High", "Remove selfdestruct or strictly protect it with authorization.",
+             lambda text: re.search(r"function\s+\w+[^\{]*\b(?:external|public)\b[^\{]*\{[\s\S]*?selfdestruct\s*\(", text, re.I) and not re.search(r"onlyOwner|require\s*\([^;]*(?:owner|admin|role)", text, re.I)),
+            ("denial_of_service", 0.70, "Medium", "Use pull payments or bounded batches for recipient processing.",
+             lambda text: re.search(r"for\s*\([^)]*;[^)]*\.length[\s\S]*?\.(?:transfer|send|call)\s*\(", text, re.I)),
         ]
-        for vuln_type, pattern, severity, reasoning, remediation in rules:
-            if vuln_type not in existing and re.search(pattern, source, re.IGNORECASE):
-                affected = [
-                    detail["function_id"]
-                    for detail in contract_info.get("function_details", [])
-                    if re.search(pattern, detail.get("content") or "", re.IGNORECASE)
-                ]
-                if not affected:
-                    continue
-                findings.append({
-                    "vulnerability_type": vuln_type,
-                    "confidence_score": 0.95,
-                    "reasoning": reasoning,
-                    "affected_functions": affected,
-                    "impact": severity,
-                    "severity": severity,
-                    "remediation": remediation,
-                    "exploitation_scenario": "Confirmed by deterministic source-pattern analysis.",
-                })
+        for vuln_type, confidence, severity, remediation, predicate in rules:
+            if vuln_type in existing:
+                continue
+            affected = [detail["function_id"] for detail in details if predicate(detail.get("content") or "")]
+            if not affected:
+                continue
+            findings.append({
+                "vulnerability_type": vuln_type, "confidence_score": confidence,
+                "reasoning": f"Deterministic source evidence found in {', '.join(affected)}.",
+                "affected_functions": affected, "impact": severity, "severity": severity,
+                "remediation": remediation, "exploitation_scenario": "Confirmed by function-scoped deterministic source analysis.",
+            })
         return findings
 
     @staticmethod

@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import re
+from collections import Counter
 from pathlib import Path
 from dotenv import load_dotenv
 from static_analysis.parse_contract import analyze_contract
@@ -9,6 +10,59 @@ from llm_agents.agent_coordinator import AgentCoordinator
 from llm_agents.config import ModelConfig
 from utils.print_utils import *
 from utils.token_tracker import performance_tracker
+
+
+def _report_confidence(finding):
+    """Return a bounded calibrated confidence without changing finding data."""
+    try:
+        return max(0.0, min(1.0, float(finding.get("skeptic_confidence", finding.get("confidence_score", 0)))))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _report_type_key(vulnerability_type):
+    value = str(vulnerability_type or "unknown").lower().replace("-", "_").replace(" ", "_")
+    aliases = {"selfdestruct": "dangerous_selfdestruct", "dangerous_selfdestruct": "dangerous_selfdestruct"}
+    return aliases.get(value, value)
+
+
+def _deduplicate_report_findings(findings):
+    """Merge report duplicates while retaining the strongest available detail."""
+    merged, merged_count = {}, 0
+    for finding in findings:
+        key = (_report_type_key(finding.get("vulnerability_type")), tuple(sorted(finding.get("affected_functions", []))))
+        current = merged.get(key)
+        if current is None:
+            merged[key] = dict(finding)
+            continue
+        merged_count += 1
+        winner, other = (finding, current) if _report_confidence(finding) > _report_confidence(current) else (current, finding)
+        item = dict(winner)
+        for field in ("reasoning", "validity_reasoning", "code_snippet"):
+            if len(str(other.get(field, ""))) > len(str(item.get(field, ""))):
+                item[field] = other[field]
+        item["merged_findings"] = int(current.get("merged_findings", 0)) + 1
+        merged[key] = item
+    return list(merged.values()), merged_count
+
+
+def _risk_level(finding):
+    confidence = _report_confidence(finding)
+    vuln_type = _report_type_key(finding.get("vulnerability_type"))
+    impact = str(finding.get("impact", finding.get("severity", ""))).lower()
+    exploitability = 1.0 if vuln_type in {"reentrancy", "dangerous_selfdestruct", "access_control"} else 0.7
+    impact_weight = 1.0 if any(label in impact for label in ("critical", "high")) else 0.65
+    score = round(100 * confidence * exploitability * impact_weight)
+    level = "Critical" if score >= 75 else "High" if score >= 50 else "Medium" if score >= 25 else "Low"
+    return level, score
+
+
+def _report_poc_quality(poc):
+    data = poc.get("poc_data", {})
+    execution = data.get("execution_results", {})
+    plan = poc.get("exploit_plan", {})
+    steps = sum(len(plan.get(key, [])) for key in ("setup_steps", "execution_steps", "validation_steps"))
+    return (int(bool(execution.get("success"))), int(bool(execution.get("executed"))), int(bool(data.get("exploit_code"))), steps)
 
 def parse_arguments():
     """Parse command line arguments for model configuration"""
@@ -65,22 +119,27 @@ def export_results_to_html(contract_path, results):
     os.makedirs(dir_path, exist_ok=True)
     output_file = os.path.join(dir_path, f"analysis_report_{contract_name}_{timestamp}.html")
 
-    rechecked_vulns = results.get("rechecked_vulnerabilities", [])
+    rechecked_vulns, merged_findings_count = _deduplicate_report_findings(results.get("rechecked_vulnerabilities", []))
     pocs = results.get("generated_pocs", [])
+    poc_metrics = results.get("poc_metrics", {})
 
     # Calculate detailed statistics
     total_vulns = len(rechecked_vulns)
     true_positives = sum(1 for v in rechecked_vulns if float(v.get('skeptic_confidence', 0)) > 0.7)
     potential_false_positives = sum(1 for v in rechecked_vulns if float(v.get('skeptic_confidence', 0)) < 0.4)
+    severity_distribution = Counter(_risk_level(v)[0] for v in rechecked_vulns)
+    confidence_distribution = Counter("High" if _report_confidence(v) >= .8 else "Medium" if _report_confidence(v) >= .5 else "Low" for v in rechecked_vulns)
+    overall_risk = round(sum(_risk_level(v)[1] for v in rechecked_vulns) / total_vulns) if total_vulns else 0
+    overall_level = "Critical" if overall_risk >= 75 else "High" if overall_risk >= 50 else "Medium" if overall_risk >= 25 else "Low"
     
-    generated_pocs_count = len(pocs)
-    compiled_pocs_count = 0
-    executed_pocs_count = 0
-    successful_exploits_count = 0
-    compilation_failures_count = 0
-    execution_failures_count = 0
+    generated_pocs_count = poc_metrics.get("generated_pocs", len(pocs))
+    compiled_pocs_count = poc_metrics.get("compiled_pocs", 0)
+    executed_pocs_count = poc_metrics.get("executed_pocs", 0)
+    successful_exploits_count = poc_metrics.get("successful_exploits", 0)
+    compilation_failures_count = poc_metrics.get("compilation_failures", 0)
+    execution_failures_count = poc_metrics.get("execution_failures", 0)
     
-    for p in pocs:
+    for p in (pocs if not poc_metrics else []):
         if "poc_data" in p:
             poc_data = p["poc_data"]
             exec_res = poc_data.get("execution_results", {})
@@ -97,6 +156,11 @@ def export_results_to_html(contract_path, results):
                 else:
                     execution_failures_count += 1
 
+    compile_rate = (compiled_pocs_count / generated_pocs_count * 100) if generated_pocs_count else 0
+    execution_rate = (successful_exploits_count / executed_pocs_count * 100) if executed_pocs_count else 0
+    repairs = poc_metrics.get("repair_attempts", sum(p.get("poc_data", {}).get("execution_results", {}).get("retries", 0) for p in pocs))
+    average_repairs = repairs / generated_pocs_count if generated_pocs_count else 0
+
     # Format vulnerabilities list for JS/HTML
     vulns_html = ""
     vulns_sidebar_html = ""
@@ -110,6 +174,7 @@ def export_results_to_html(contract_path, results):
         
         confidence_class = "conf-high" if confidence > 0.7 else "conf-medium" if confidence > 0.4 else "conf-low"
         confidence_label = f"{confidence:.2f}"
+        risk_level, risk_score = _risk_level(vuln)
         
         # Sidebar item
         vulns_sidebar_html += f"""
@@ -129,7 +194,8 @@ def export_results_to_html(contract_path, results):
         
         # Find matching PoC
         poc_info_html = "<p class='no-poc'>No Proof of Concept generated.</p>"
-        matching_poc = next((p for p in pocs if p.get("vulnerability", {}).get("vulnerability_type") == vuln_type), None)
+        matching = [p for p in pocs if _report_type_key(p.get("vulnerability", {}).get("vulnerability_type")) == _report_type_key(vuln_type)]
+        matching_poc = max(matching, key=_report_poc_quality, default=None)
         
         if matching_poc:
             plan = matching_poc.get("exploit_plan", {})
@@ -160,13 +226,19 @@ def export_results_to_html(contract_path, results):
             else:
                 status_html = "<span class='badge conf-medium'>SKIPPED / UNTESTED</span>"
                 
-            error_msg = exec_res.get("error", "")
-            error_html = f"<div class='error-box'><h5>Execution Output:</h5><pre><code>{error_msg}</code></pre></div>" if error_msg else ""
+            compiler_diagnostics = exec_res.get("compile_error", "")
+            runtime_diagnostics = exec_res.get("runtime_error", exec_res.get("error", ""))
+            execution_trace = exec_res.get("execution_trace", "")
+            error_html = "".join((
+                f"<div class='error-box'><h5>Compiler Diagnostics</h5><pre><code>{compiler_diagnostics}</code></pre></div>" if compiler_diagnostics else "",
+                f"<div class='error-box'><h5>Runtime Diagnostics</h5><pre><code>{runtime_diagnostics}</code></pre></div>" if runtime_diagnostics else "",
+                f"<div class='error-box'><h5>Execution Trace</h5><pre><code>{execution_trace}</code></pre></div>" if execution_trace else "",
+            ))
             
             # Extract gas usage
             gas_usage = "N/A"
-            if error_msg:
-                gas_match = re.search(r"gas:\s*(\d+)", error_msg)
+            if runtime_diagnostics:
+                gas_match = re.search(r"gas:\s*(\d+)", runtime_diagnostics)
                 if gas_match:
                     gas_usage = gas_match.group(1)
 
@@ -175,7 +247,7 @@ def export_results_to_html(contract_path, results):
                 <h4>PoC Details</h4>
                 <p><strong>File:</strong> <code>{os.path.basename(poc_data.get('exploit_file', 'N/A'))}</code></p>
                 <p><strong>Status:</strong> {status_html} | <strong>Compiled:</strong> {'✅' if exec_res.get('compiled') else '❌'} | <strong>Executed:</strong> {'✅' if exec_res.get('executed') else '❌'}</p>
-                <p><strong>Gas Usage:</strong> {gas_usage}</p>
+                <p><strong>Gas Usage:</strong> {exec_res.get('gas_used', gas_usage)} | <strong>Repair Attempts:</strong> {exec_res.get('retries', 0)}</p>
                 {error_html}
                 {plan_html}
                 {f"<h5>Exploit Code</h5>{code_html}" if exploit_code else ""}
@@ -191,6 +263,9 @@ def export_results_to_html(contract_path, results):
             <div class="details-body">
                 <div class="meta-section">
                     <p><strong>Affected Functions:</strong> {affected_funcs or 'None'}</p>
+                    <p><strong>Risk:</strong> {risk_level} ({risk_score}/100) | <strong>Calibrated Confidence:</strong> {confidence_label}</p>
+                    <p><strong>Skeptic Verdict:</strong> {vuln.get('skeptic_status', 'N/A')} | <strong>Merged Findings:</strong> {vuln.get('merged_findings', 0)}</p>
+                    <p><strong>Deterministic Evidence:</strong> {vuln.get('exploitation_scenario', 'N/A')}</p>
                 </div>
                 
                 <div class="tabs-container">
@@ -231,6 +306,18 @@ def export_results_to_html(contract_path, results):
     if any('unchecked' in vt for vt in found_vuln_types):
         recs_html += "<li><strong>Unchecked Returns:</strong> Check return values of external calls.</li>"
     recs_html += "<li><strong>General:</strong> Conduct thorough testing and consider professional audits.</li>"
+    severity_html = "".join(f"<div class='bar-row'><span>{level}</span><div class='bar'><i style='width:{(count / max(total_vulns, 1)) * 100:.0f}%'></i></div><b>{count}</b></div>" for level, count in (('Critical', severity_distribution['Critical']), ('High', severity_distribution['High']), ('Medium', severity_distribution['Medium']), ('Low', severity_distribution['Low'])))
+    confidence_html = "".join(f"<div class='bar-row'><span>{level}</span><div class='bar'><i style='width:{(count / max(total_vulns, 1)) * 100:.0f}%'></i></div><b>{count}</b></div>" for level, count in (('High', confidence_distribution['High']), ('Medium', confidence_distribution['Medium']), ('Low', confidence_distribution['Low'])))
+    top_risks = sorted(rechecked_vulns, key=lambda finding: _risk_level(finding)[1], reverse=True)[:5]
+    top_risks_html = "".join(f"<li>{finding.get('vulnerability_type', 'Unknown')} — {_risk_level(finding)[0]} ({_risk_level(finding)[1]}/100)</li>" for finding in top_risks) or "<li>No findings identified.</li>"
+    performance = performance_tracker.get_performance_summary()
+    token_total = performance['token_usage']['total']['total_tokens']
+    runtime = performance['run_info']['total_time_seconds']
+    agent_times_html = "".join(
+        f"<li>{stage}: {seconds:.2f}s</li>" for stage, seconds in performance['time_metrics']['stage_times'].items()
+    ) or "<li>No completed stages recorded.</li>"
+    tokens_per_vulnerability = token_total / total_vulns if total_vulns else 0
+    time_per_vulnerability = runtime / total_vulns if total_vulns else 0
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -277,6 +364,11 @@ def export_results_to_html(contract_path, results):
         .tab-btn.active {{ color: white; border-bottom: 2px solid var(--primary); }}
         pre {{ background: #0b0f19 !important; padding: 1rem !important; border-radius: 0.4rem; overflow: auto; }}
         .error-box {{ background: #1e293b; padding: 1rem; border-radius: 0.4rem; margin-top: 1rem; }}
+        .summary-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:1rem; margin-bottom:2rem; }}
+        .summary-card {{ background:var(--bg-card); border:1px solid var(--border); border-radius:.5rem; padding:1rem; }}
+        .bar-row {{ display:grid; grid-template-columns:70px 1fr 24px; gap:.5rem; align-items:center; margin:.45rem 0; font-size:.85rem; }}
+        .bar {{ height:10px; background:var(--bg-accent); border-radius:99px; overflow:hidden; }}
+        .bar i {{ display:block; height:100%; background:var(--primary); }}
     </style>
 </head>
 <body>
@@ -287,12 +379,20 @@ def export_results_to_html(contract_path, results):
     </header>
     <main class="main-container">
         <div class="stats-grid">
+            <div class="stat-card"><div class="stat-label">Overall Risk</div><div class="stat-value">{overall_level} {overall_risk}/100</div></div>
             <div class="stat-card"><div class="stat-label">Total</div><div class="stat-value">{total_vulns}</div></div>
             <div class="stat-card"><div class="stat-label">True Positives</div><div class="stat-value">{true_positives}</div></div>
+            <div class="stat-card"><div class="stat-label">Potential False Positives</div><div class="stat-value">{potential_false_positives}</div></div>
             <div class="stat-card"><div class="stat-label">Generated PoCs</div><div class="stat-value">{generated_pocs_count}</div></div>
             <div class="stat-card"><div class="stat-label">Compiled</div><div class="stat-value">{compiled_pocs_count}</div></div>
             <div class="stat-card"><div class="stat-label">Executed</div><div class="stat-value">{executed_pocs_count}</div></div>
             <div class="stat-card"><div class="stat-label">Successful</div><div class="stat-value" style="color:var(--low-conf)">{successful_exploits_count}</div></div>
+        </div>
+        <div class="summary-grid">
+            <section class="summary-card"><h3>Executive Summary</h3><p>{total_vulns} consolidated finding(s), {merged_findings_count} duplicate(s) merged. Overall risk is <strong>{overall_level}</strong>.</p><h4>Top Risks</h4><ol>{top_risks_html}</ol></section>
+            <section class="summary-card"><h3>Severity Distribution</h3>{severity_html}<h3>Confidence Distribution</h3>{confidence_html}</section>
+            <section class="summary-card"><h3>Performance Dashboard</h3><p>Tokens: {token_total:,}</p><p>Runtime: {runtime:.2f}s</p><p>Tokens/finding: {tokens_per_vulnerability:.1f}; time/finding: {time_per_vulnerability:.2f}s</p><p>Average repairs: {average_repairs:.2f}</p><p>Compile success: {compile_rate:.1f}%</p><p>Execution success: {execution_rate:.1f}%</p><p>Compilation failures: {compilation_failures_count}; execution failures: {execution_failures_count}</p><h4>Agent Timeline</h4><ul>{agent_times_html}</ul></section>
+            <section class="summary-card"><h3>Recommended Fixes</h3><ul>{recs_html}</ul><p><strong>Audit conclusion:</strong> Address Critical/High findings first, then re-run generated PoCs and regression tests.</p></section>
         </div>
         <div class="report-layout">
             <div class="sidebar"><h3>Findings</h3><div class="sidebar-list">{vulns_sidebar_html}</div></div>
@@ -410,6 +510,9 @@ def main():
 
     with open(filepath, "r", encoding="utf-8") as f:
         source_code = f.read()
+    # The tracker cannot infer the input from downstream dictionaries; record
+    # the concrete Solidity file once it has been successfully read.
+    performance_tracker.log_code_analysis([filepath])
 
     contract_info = {
         "function_details": function_details,
@@ -430,6 +533,13 @@ def main():
         return
 
     performance_tracker.start_stage("export")
+    if args.export_json:
+        try:
+            with open(args.export_json, "w", encoding="utf-8") as handle:
+                json.dump(results, handle, indent=2, default=str)
+            print_success(f"JSON results: {args.export_json}")
+        except OSError as exc:
+            print_warning(f"JSON export failed: {exc}")
     export_results_to_html(filepath, results)
     performance_tracker.end_stage()
     performance_tracker.print_summary()

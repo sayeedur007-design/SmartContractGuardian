@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -28,80 +29,64 @@ class ExploitRunner:
     def run_and_fix_exploit(self, poc_data: Dict) -> Dict:
         path = Path(poc_data.get("exploit_file", ""))
         if not path.is_file():
-            return {"success": False, "error": poc_data.get("generation_error", "Exploit file not found"), "output": "", "retries": 0, "diagnostics": []}
-        
-        diagnostics, output, success = [], "", False
+            return self._result(error=poc_data.get("generation_error", "Exploit file not found"))
+
+        diagnostics, output = [], ""
         previous_attempt = ""
-        
-        # Track detailed stats
-        compilation_success = True # If we reached here, it compiled once in Generator
-        execution_success = False
-        
+        last_compile = {"compiled": False, "compile_error": "", "stdout": "", "stderr": "", "compile_time": 0.0}
+        last_execution = {"executed": False, "success": False, "runtime_error": "", "stdout": "", "stderr": "", "execution_time": 0.0, "gas_used": None, "execution_trace": ""}
         for attempt in range(self.max_retries + 1):
-            success, output = self._execute_test(path, attempt)
-            diagnostic = self._diagnose(output)
-            diagnostics.append(diagnostic)
-            
-            if success:
-                execution_success = True
-                return {
-                    "success": True, 
-                    "output": output, 
-                    "error": "", 
-                    "file_path": str(path), 
-                    "retries": attempt, 
-                    "diagnostics": diagnostics,
-                    "compiled": True,
-                    "executed": True
-                }
-            
+            current = path.read_text(encoding="utf-8")
+            last_compile = self.validator.compile_candidate(current, attempt=attempt)
+            if last_compile["compiled"]:
+                last_execution = self._execute_test(path, attempt, current)
+                output = last_execution["output"]
+                diagnostic = self._diagnose(output)
+                diagnostics.append(diagnostic)
+                if last_execution["success"]:
+                    return self._result(path, attempt, diagnostics, last_compile, last_execution)
+            else:
+                output = last_compile["output"]
+                diagnostic = self._diagnose(output)
+                diagnostics.append(diagnostic)
+
             if attempt == self.max_retries:
                 break
-                
             current = path.read_text(encoding="utf-8")
-            candidate = self._fix_test_code(current, output, diagnostic, previous_attempt)
+            candidate = self._fix_test_code(current, output, diagnostic, previous_attempt, poc_data.get("target_contract", {}))
             previous_attempt = current
-            
             if not candidate:
                 continue
-                
             candidate = GeneratorAgent._clean_solidity(candidate)
-            # Repairs are accepted only after structural validation and Forge compilation.
+            self._write_repair_artifacts(path, candidate, output, attempt)
             target = poc_data.get("target_contract", {"filename": "VulnerableContract.sol", "contract_name": "VulnerableContract", "functions": []})
             errors = self.validator.validate_contract(candidate, {}, target)
-            
-            # If validation fails, try to fix it or skip
             if errors:
                 diagnostics.append({"categories": ["RepairValidationError"], "output": "; ".join(errors)})
                 continue
-
-            compiled, compile_output = self.validator.compile_candidate(candidate)
-            self._write_repair_log(path, attempt, "build", compile_output)
-            
-            if not compiled:
-                compilation_success = False
-                diagnostics.append({"categories": ["RepairCompilationError"], "output": compile_output})
-                continue
-            
-            compilation_success = True
             path.write_text(candidate, encoding="utf-8")
-            
-        return {
-            "success": False, 
-            "output": output, 
-            "error": output, 
-            "file_path": str(path), 
-            "retries": self.max_retries, 
-            "diagnostics": diagnostics,
-            "compiled": compilation_success,
-            "executed": True if output else False
-        }
 
-    def _execute_test(self, path: Path, attempt: int) -> Tuple[bool, str]:
-        relative = path.resolve().relative_to(self.exploit_root.resolve()).as_posix()
+        return self._result(path, self.max_retries, diagnostics, last_compile, last_execution)
+
+    def _execute_test(self, path: Path, attempt: int, code: str) -> Dict:
+        execution_root = self.exploit_root / ".poc_execution" / uuid.uuid4().hex
+        started = time.perf_counter()
+        stdout = stderr = ""
+        returncode = None
         try:
-            # Use -vv to see assertions and traces
-            command = ["forge", "test", "-vv", "--no-cache", "--match-path", f"./{relative}"]
+            (execution_root / "test").mkdir(parents=True)
+            self.validator._copy_candidate_sources(code, execution_root / "src")
+            lib = self.exploit_root / "lib"
+            if lib.exists():
+                shutil.copytree(lib, execution_root / "lib")
+            self.validator.generate_basetest_file()
+            shutil.copy2(self.validator.test_dir / "basetest.sol", execution_root / "test" / "basetest.sol")
+            (execution_root / "test" / "Candidate.t.sol").write_text(code, encoding="utf-8")
+            (execution_root / "foundry.toml").write_text(
+                '[profile.default]\nsrc = "src"\ntest = "test"\nlibs = ["lib"]\nout = "out"\ncache_path = "cache"\n',
+                encoding="utf-8",
+            )
+            command = ["forge", "test", "-vv", "--match-path", "./test/Candidate.t.sol"]
             solc = shutil.which("solc")
             if solc:
                 command.extend(["--use", solc])
@@ -115,25 +100,70 @@ class ExploitRunner:
                 timeout=self.model_config.forge_test_timeout,
                 env=GeneratorAgent._forge_env(),
             )
-            output = (result.stdout or "") + ("\n" if result.stdout and result.stderr else "") + (result.stderr or "")
+            stdout, stderr, returncode = result.stdout or "", result.stderr or "", result.returncode
         except (OSError, subprocess.TimeoutExpired) as exc:
-            output, result = f"Unable to execute forge test: {exc}", None
-        
+            stderr = f"Unable to execute forge test: {exc}"
+        finally:
+            shutil.rmtree(execution_root, ignore_errors=True)
+            try:
+                execution_root.parent.rmdir()
+            except OSError:
+                pass
+        execution_time = time.perf_counter() - started
+        output = stdout + ("\n" if stdout and stderr else "") + stderr
+        # Foundry's return code is stable across output-format changes.
+        success = returncode == 0
+        self._write_execution_artifacts(path, code, stdout, stderr, attempt)
+        return {
+            "executed": returncode is not None,
+            "success": success,
+            "runtime_error": "" if success else (stderr or stdout or "Forge execution failed with no diagnostic."),
+            "stdout": stdout, "stderr": stderr, "output": output,
+            "execution_time": execution_time,
+            "gas_used": self._extract_gas(output),
+            "execution_trace": output,
+            "failure_reason": "" if success else self._failure_reason(output, returncode),
+        }
+
+    def _result(self, path: Optional[Path] = None, retries: int = 0, diagnostics=None,
+                compile_result=None, execution_result=None, error: str = "") -> Dict:
+        compile_result = compile_result or {"compiled": False, "compile_error": error, "stdout": "", "stderr": "", "compile_time": 0.0}
+        execution_result = execution_result or {"executed": False, "success": False, "runtime_error": error, "stdout": "", "stderr": "", "output": "", "execution_time": 0.0, "gas_used": None, "execution_trace": ""}
+        success = bool(compile_result["compiled"] and execution_result["success"])
+        return {"success": success, "compiled": bool(compile_result["compiled"]),
+                "executed": bool(execution_result["executed"]), "compile_error": compile_result.get("compile_error", ""),
+                "runtime_error": execution_result.get("runtime_error", ""),
+                "failure_reason": execution_result.get("failure_reason", "") or ("CompilationFailure" if not compile_result["compiled"] else ""),
+                "stdout": execution_result.get("stdout", "") or compile_result.get("stdout", ""),
+                "stderr": execution_result.get("stderr", "") or compile_result.get("stderr", ""),
+                "output": execution_result.get("output", "") or compile_result.get("output", ""),
+                "error": error or execution_result.get("runtime_error", "") or compile_result.get("compile_error", ""),
+                "file_path": str(path) if path else "", "retries": retries, "diagnostics": diagnostics or [],
+                "compile_time": compile_result.get("compile_time", 0.0), "execution_time": execution_result.get("execution_time", 0.0),
+                "gas_used": execution_result.get("gas_used"), "execution_trace": execution_result.get("execution_trace", "")}
+
+    def _write_execution_artifacts(self, path: Path, code: str, stdout: str, stderr: str, attempt: int) -> None:
         reports = self.project_root / "reports"
         reports.mkdir(exist_ok=True)
-        log = reports / f"forge_{path.stem}_{int(time.time() * 1000)}_attempt{attempt}.log"
-        log.write_text(output, encoding="utf-8")
-        
-        # Success if return code is 0 AND we see "PASS" in the output for our test
-        # Sometimes forge returns 0 even if some tests fail if not configured correctly, 
-        # but usually it's reliable. We check for "testExploit() (gas: " or similar.
-        success = bool(result and result.returncode == 0 and "testExploit() (gas: " in output and "ok" in output.lower())
+        prefix = reports / f"runner_{path.stem}_{int(time.time() * 1000)}_{uuid.uuid4().hex}_attempt{attempt}_execute"
+        prefix.with_suffix(".sol").write_text(code, encoding="utf-8")
+        prefix.with_suffix(".stdout.log").write_text(stdout, encoding="utf-8")
+        prefix.with_suffix(".stderr.log").write_text(stderr, encoding="utf-8")
+        # -vv writes Foundry's runtime trace to stdout; keeping a separate
+        # artifact makes trace discovery independent of Forge formatting.
+        prefix.with_suffix(".trace.log").write_text(stdout + ("\n" if stdout and stderr else "") + stderr, encoding="utf-8")
 
-        if not success and result and result.returncode == 0:
-            # Fallback check for general pass
-            success = "PASS" in output and "FAIL" not in output
-            
-        return success, output
+    def _write_repair_artifacts(self, path: Path, code: str, diagnostic: str, attempt: int) -> None:
+        reports = self.project_root / "reports"
+        reports.mkdir(exist_ok=True)
+        prefix = reports / f"runner_{path.stem}_{int(time.time() * 1000)}_{uuid.uuid4().hex}_attempt{attempt}_repair"
+        prefix.with_suffix(".sol").write_text(code, encoding="utf-8")
+        prefix.with_suffix(".diagnostic.log").write_text(diagnostic, encoding="utf-8")
+
+    @staticmethod
+    def _extract_gas(output: str) -> Optional[int]:
+        match = re.search(r"\bgas:\s*(\d+)", output, re.I)
+        return int(match.group(1)) if match else None
 
     def _write_repair_log(self, path: Path, attempt: int, stage: str, output: str) -> None:
         reports = self.project_root / "reports"
@@ -151,8 +181,19 @@ class ExploitRunner:
         }.items() if re.search(pattern, output, re.I)]
         return {"categories": categories or ["UnknownFailure"], "output": output}
 
-    def _fix_test_code(self, current: str, output: str, diagnostic: Dict, previous: str) -> Optional[str]:
-        prompt = f"""Rewrite this complete Foundry test to repair the reported failure. Do not regenerate blindly: preserve the intended exploit and directly address every compiler/runtime diagnostic. Return only complete Solidity.
+    @staticmethod
+    def _failure_reason(output: str, returncode: Optional[int]) -> str:
+        diagnostic = ExploitRunner._diagnose(output)
+        for category in ("FailedAssertion", "Panic", "OutOfGas", "Revert", "RuntimeFailure"):
+            if category in diagnostic["categories"]:
+                return category
+        return "ForgeExecutionError" if returncode is not None else "ForgeLaunchError"
+
+    def _fix_test_code(self, current: str, output: str, diagnostic: Dict, previous: str, target: Dict) -> Optional[str]:
+        function_map = ", ".join(target.get("functions", [])) or "none"
+        public_members = ", ".join(target.get("public_members", [])) or "none"
+        prompt = f"""You repair compact Solidity Foundry tests for qwen2.5-coder:7b. Rewrite this complete test and return only Solidity.
+Preserve the exploit/demonstration intent and address every diagnostic. The target permits only these callable signatures: {function_map}. Its public getters are: {public_members}. Never invent target functions, variables, imports, pragma, or constructor arguments.
 
 CURRENT SOLIDITY:
 {current}

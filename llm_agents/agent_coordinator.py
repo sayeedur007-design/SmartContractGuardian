@@ -149,10 +149,20 @@ class AgentCoordinator:
 
         # 3. Generate PoCs for high-confidence vulnerabilities
         generated_pocs = []
+        poc_metrics = {
+            "generated_pocs": 0, "compiled_pocs": 0, "executed_pocs": 0,
+            "successful_exploits": 0, "compilation_failures": 0,
+            "execution_failures": 0, "repair_attempts": 0,
+            "_compile_times": [], "_execution_times": [],
+        }
         high_conf_vulns = [
-    v for v in rechecked_vulns
-    if float(v.get("skeptic_confidence", 0)) >= 0.6
-]
+            v for v in rechecked_vulns
+            if float(v.get("skeptic_confidence", 0)) >= 0.6
+            or (
+                any(marker in str(v.get("vulnerability_type", "")).lower() for marker in ("reentrancy", "access", "selfdestruct", "unchecked"))
+                and float(v.get("skeptic_confidence", 0)) >= 0.4
+            )
+        ]
 
         # Process high confidence vulnerabilities
         if high_conf_vulns:
@@ -188,10 +198,16 @@ class AgentCoordinator:
                 # Generate the PoC for this vulnerability
                 # Preserve target metadata so the generator imports the analyzed source by name.
                 plan_data["target_contract"] = contract_info.get("target_contract", {})
+                console.print("[dim]Generator called.[/dim]")
                 poc_data = self.generator.generate(plan_data)
+                if poc_data.get("exploit_file"):
+                    poc_metrics["generated_pocs"] += 1
+                    console.print(f"[bold green]PoC created: {poc_data['exploit_file']}[/bold green]")
+                else:
+                    console.print(f"[bold red]PoC rejected: {poc_data.get('generation_error', 'no Solidity file created')}[/bold red]")
 
                 # Run and fix the exploit if auto-run is enabled
-                if auto_run_config.get("auto_run", True):
+                if auto_run_config.get("auto_run", True) and poc_data.get("poc_strategy", "executable") == "executable":
                     performance_tracker.start_stage("exploit_runner")
                     console.print(f"\n[bold blue]🔍 ExploitRunner: Testing and fixing PoC...[/bold blue]")
                     run_result = self.runner.run_and_fix_exploit(poc_data)
@@ -209,12 +225,51 @@ class AgentCoordinator:
                     # Add execution results to the PoC data
                     poc_data["execution_results"] = {
                         "success": run_result.get("success", False),
+                        "compiled": run_result.get("compiled", False),
+                        "executed": run_result.get("executed", False),
                         "retries": run_result.get("retries", 0),
-                        "error": run_result.get("error", ""),
-                        "output": run_result.get("output", "")[:500]  # Truncate long outputs
+                        "compile_error": run_result.get("compile_error", ""),
+                        "runtime_error": run_result.get("runtime_error", ""),
+                        "failure_reason": run_result.get("failure_reason", ""),
+                        "stdout": run_result.get("stdout", ""),
+                        "stderr": run_result.get("stderr", ""),
+                        "gas_used": run_result.get("gas_used"),
+                        "execution_trace": run_result.get("execution_trace", ""),
+                        "compile_time": run_result.get("compile_time", 0.0),
+                        "execution_time": run_result.get("execution_time", 0.0),
                     }
+                    # Metrics are derived only from the runner's observed
+                    # compilation/execution result, never inferred from a
+                    # generated file or output text.
+                    poc_metrics["repair_attempts"] += run_result.get("retries", 0)
+                    if run_result.get("compiled"):
+                        poc_metrics["compiled_pocs"] += 1
+                        poc_metrics["_compile_times"].append(run_result.get("compile_time", 0.0))
+                    else:
+                        poc_metrics["compilation_failures"] += 1
+                    if run_result.get("executed"):
+                        poc_metrics["executed_pocs"] += 1
+                        poc_metrics["_execution_times"].append(run_result.get("execution_time", 0.0))
+                    if run_result.get("compiled") and run_result.get("executed") and not run_result.get("success"):
+                        poc_metrics["execution_failures"] += 1
+                    if run_result.get("success"):
+                        poc_metrics["successful_exploits"] += 1
                 else:
-                    console.print(f"[dim]Auto-run disabled. Test generated but not executed.[/dim]")
+                    if poc_data.get("poc_strategy") in {"demonstration", "informational"}:
+                        console.print("[dim]Demonstration PoC created; Forge execution is not required.[/dim]")
+                    else:
+                        console.print("[dim]Auto-run disabled. Test generated but not executed.[/dim]")
+                    poc_data["execution_results"] = {
+                        "success": False,
+                        "compiled": poc_data.get("compiled", False),
+                        "executed": False,
+                        "retries": 0,
+                        "compile_error": poc_data.get("compile_error", ""),
+                        "runtime_error": "",
+                    }
+                    if poc_data.get("compiled"):
+                        poc_metrics["compiled_pocs"] += 1
+                        poc_metrics["_compile_times"].append(poc_data.get("compile_time", 0.0))
 
                 # Add PoC data to the result
                 poc_info["poc_data"] = poc_data
@@ -228,8 +283,13 @@ class AgentCoordinator:
         
         # Avoid printing token stats here - we'll do it in main.py as part of the comprehensive performance summary
         
+        compile_times = poc_metrics.pop("_compile_times")
+        execution_times = poc_metrics.pop("_execution_times")
+        poc_metrics["average_compile_time"] = sum(compile_times) / len(compile_times) if compile_times else 0.0
+        poc_metrics["average_execution_time"] = sum(execution_times) / len(execution_times) if execution_times else 0.0
         return {
             "rechecked_vulnerabilities": rechecked_vulns,
             "generated_pocs": generated_pocs,
+            "poc_metrics": poc_metrics,
             "token_usage": token_tracker.get_usage_summary() if 'token_tracker' in locals() else None
         }

@@ -52,16 +52,15 @@ class SkepticAgent:
             task = progress.add_task("Analyzing...")
 
             # Build prompts
-            system_prompt = """You are a skeptical Smart Contract Security Auditor. 
-Your job is to verify findings from a previous analyzer.
-Be extremely critical. Most findings might be false positives.
+            system_prompt = """You are an objective, source-grounded Smart Contract Security Auditor.
+Verify each reported finding using only the supplied contract source, affected function, and attached code snippet. Do not invent Solidity code or infer omitted checks.
 
 For each finding:
-1. Examine the contract source code carefully.
-2. Check if the vulnerability actually exists and is exploitable.
-3. Reject if the reasoning is flawed or the code handles the issue correctly.
-4. Provide a confidence score (0.0-1.0).
-5. Provide reasoning for your verdict.
+1. Identify concrete source evidence that supports or explicitly disproves the reported condition.
+2. If evidence is insufficient, return INSUFFICIENT_EVIDENCE; do not reject it merely because proof is absent.
+3. Reject only when exact Solidity evidence disproves the analyzer reasoning.
+4. Provide a confidence score (0.0-1.0) for your independent assessment and concise evidence-grounded reasoning.
+5. Use one verdict: VERIFIED, LIKELY, NEEDS_REVIEW, WEAK, REJECTED, or INSUFFICIENT_EVIDENCE.
 
 Return ONLY valid JSON in this format:
 {
@@ -71,7 +70,7 @@ Return ONLY valid JSON in this format:
       "skeptic_confidence": 0.9,
       "validity_reasoning": "Detailed reason why it is valid or invalid",
       "evidence_lines": ["code snippet from contract"],
-      "verdict": "accepted"
+      "verdict": "LIKELY"
     }
   ]
 }"""
@@ -89,7 +88,7 @@ Return ONLY valid JSON in this format:
 
             user_prompt += """Please re-check each vulnerability from #0, #1, #2, etc.
     You may reject a finding only when you cite exact Solidity evidence that disproves its analyzer reasoning.
-    A missing, irrelevant, or empty evidence_lines field is not a valid rejection.
+    If evidence is missing or inconclusive, use INSUFFICIENT_EVIDENCE or NEEDS_REVIEW.
     Return one verdict for every input index.
     Return a JSON object with the final verdict.
     """
@@ -180,10 +179,12 @@ Return ONLY valid JSON in this format:
                 except (TypeError, ValueError):
                     confidence = None
                 reasoning = str(verdict.get("validity_reasoning", ""))
+                reasoning = self._ground_execution_order(finding, reasoning, contract_source)
                 evidence = verdict.get("evidence_lines", [])
                 if isinstance(evidence, str):
                     evidence = [evidence]
                 has_evidence = any(str(line).strip() for line in evidence)
+                verdict_name = str(verdict.get("verdict", "INSUFFICIENT_EVIDENCE")).upper()
                 if confidence is None:
                     print_warning(f"Skeptic verdict #{idx} has no numeric confidence; retaining Analyzer finding.")
                     item = dict(finding)
@@ -191,28 +192,79 @@ Return ONLY valid JSON in this format:
                     item["validity_reasoning"] = "Skeptic verdict had no valid confidence; retained Analyzer finding."
                     item["skeptic_status"] = "fallback_invalid_verdict"
                     accepted.append(item)
-                elif confidence <= 0.0:
-                    if not has_evidence:
-                        print_warning(f"Skeptic rejected {finding.get('vulnerability_type')} without Solidity evidence; retaining Analyzer finding.")
-                        item = dict(finding)
-                        item["skeptic_confidence"] = float(item.get("confidence_score", 0.0))
-                        item["validity_reasoning"] = "Skeptic rejection lacked required Solidity evidence; retained Analyzer finding."
-                        item["skeptic_status"] = "fallback_unsupported_rejection"
-                        accepted.append(item)
-                    else:
-                        print_warning(f"Skeptic rejected {finding.get('vulnerability_type')}: {reasoning or 'no reason supplied'} | evidence={evidence}")
+                elif verdict_name == "REJECTED" and self._explicit_disproof(evidence, reasoning, contract_source):
+                    print_warning(f"Skeptic rejected {finding.get('vulnerability_type')}: {reasoning or 'explicit source disproof'}")
                 else:
                     item = dict(finding)
-                    item["skeptic_confidence"] = max(0.0, min(1.0, confidence))
-                    item["validity_reasoning"] = reasoning
+                    calibrated = self._calibrate_confidence(finding, confidence, evidence, contract_source, verdict_name)
+                    item["skeptic_confidence"] = calibrated
+                    item["confidence_score"] = calibrated
+                    item["validity_reasoning"] = reasoning or "INSUFFICIENT_EVIDENCE: retained without an explicit Solidity disproof."
                     item["skeptic_evidence_lines"] = evidence
-                    item["skeptic_status"] = "verified"
+                    item["skeptic_status"] = verdict_name if verdict_name in {"VERIFIED", "LIKELY", "NEEDS_REVIEW", "WEAK", "INSUFFICIENT_EVIDENCE"} else "INSUFFICIENT_EVIDENCE"
+                    item["confidence_level"] = self._confidence_level(calibrated, item["skeptic_status"])
                     accepted.append(item)
 
             progress.update(task, completed=True)
 
         self._log_findings("Skeptic merged output", accepted)
         return sorted(accepted, key=lambda x: x.get("skeptic_confidence", 0), reverse=True)
+
+    @staticmethod
+    def _explicit_disproof(evidence: list, reasoning: str, contract_source: str) -> bool:
+        """Only a source-backed protective condition can justify rejection."""
+        joined = "\n".join(str(line) for line in evidence if str(line).strip())
+        if not joined or not all(line.strip() in contract_source for line in evidence if str(line).strip()):
+            return False
+        return bool(re.search(
+            r"onlyOwner|onlyRole|nonReentrant|revert\s+Unauthorized|"
+            r"require\s*\([^;]*(?:msg\.sender\s*==\s*(?:owner|admin)|hasRole|owner\s*==\s*msg\.sender)",
+            joined + "\n" + reasoning, re.I,
+        ))
+
+    @staticmethod
+    def _calibrate_confidence(finding: dict, skeptic_confidence: float, evidence: list,
+                              contract_source: str, verdict: str) -> float:
+        analyzer_confidence = max(0.0, min(1.0, float(finding.get("confidence_score", 0.0) or 0.0)))
+        source_evidence = any(str(line).strip() and str(line).strip() in contract_source for line in evidence)
+        deterministic = str(finding.get("reasoning", "")).startswith("Deterministic source evidence")
+        evidence_score = 1.0 if deterministic and source_evidence else (0.75 if source_evidence else 0.45)
+        calibrated = 0.45 * analyzer_confidence + 0.40 * max(0.0, min(1.0, skeptic_confidence)) + 0.15 * evidence_score
+        if verdict in {"INSUFFICIENT_EVIDENCE", "NEEDS_REVIEW"}:
+            calibrated = min(calibrated, 0.69)
+        elif verdict == "WEAK":
+            calibrated = min(calibrated, 0.49)
+        return round(max(0.0, min(1.0, calibrated)), 3)
+
+    @staticmethod
+    def _confidence_level(confidence: float, status: str) -> str:
+        if status == "INSUFFICIENT_EVIDENCE":
+            return "Needs Review"
+        if confidence >= 0.80:
+            return "Verified"
+        if confidence >= 0.65:
+            return "Likely"
+        if confidence >= 0.40:
+            return "Needs Review"
+        return "Weak"
+
+    @staticmethod
+    def _ground_execution_order(finding: dict, reasoning: str, contract_source: str) -> str:
+        """Prevent a reentrancy assessment from contradicting observable order."""
+        if "reentrancy" not in str(finding.get("vulnerability_type", "")).lower():
+            return reasoning
+        snippet = str(finding.get("code_snippet", "")) or contract_source
+        external_call = re.search(r"\.call\s*\{[^}]*value\s*:", snippet, re.I)
+        state_update = re.search(r"(?:balances|\w+)\s*\[[^\]]+\]\s*[-+]?=", snippet)
+        if external_call and state_update and external_call.start() < state_update.start():
+            contradiction = re.search(r"(?:correctly\s+follows|follows)\s+checks[-\s]?effects[-\s]?interactions", reasoning, re.I)
+            if contradiction:
+                return (
+                    "Source execution order shows an external value call before the state update; "
+                    "this does not follow checks-effects-interactions. "
+                    "The prior reasoning contradicted the supplied Solidity snippet."
+                )
+        return reasoning
 
     def _parse_response(self, text_out: str):
         from utils.json_cleaner import parse_json_safely

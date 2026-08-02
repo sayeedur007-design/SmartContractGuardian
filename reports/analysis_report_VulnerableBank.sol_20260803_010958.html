@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Contract Vulnerability Analysis Report</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <style>
+        :root {
+            --bg-main: #0f172a;
+            --bg-card: #1e293b;
+            --bg-accent: #334155;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --primary: #4f46e5;
+            --primary-gradient: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+            --border: #475569;
+            --high-conf: #ef4444;
+            --med-conf: #f59e0b;
+            --low-conf: #10b981;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Inter', sans-serif; background-color: var(--bg-main); color: var(--text-main); line-height: 1.6; }
+        header { background: var(--primary-gradient); padding: 2rem; color: white; margin-bottom: 2rem; }
+        .header-container { max-width: 1400px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; }
+        .main-container { max-width: 1400px; margin: 0 auto; padding: 0 1.5rem; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+        .stat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; }
+        .stat-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; }
+        .stat-value { font-size: 1.4rem; font-weight: 700; }
+        .report-layout { display: grid; grid-template-columns: 300px 1fr; gap: 2rem; }
+        .sidebar { background: var(--bg-card); border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; }
+        .sidebar-item { padding: 0.75rem; background: var(--bg-accent); border-radius: 0.4rem; cursor: pointer; margin-bottom: 0.5rem; display: flex; justify-content: space-between; font-size: 0.85rem; }
+        .sidebar-item.active { background: var(--primary); }
+        .badge { font-size: 0.65rem; padding: 0.2rem 0.4rem; border-radius: 0.2rem; }
+        .conf-high { background: var(--high-conf); }
+        .conf-medium { background: var(--med-conf); color: black; }
+        .conf-low { background: var(--low-conf); }
+        .vuln-details-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 0.5rem; padding: 1.5rem; }
+        .tab-buttons { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 1rem; }
+        .tab-btn { background: none; border: none; color: var(--text-muted); padding: 0.5rem 1rem; cursor: pointer; }
+        .tab-btn.active { color: white; border-bottom: 2px solid var(--primary); }
+        pre { background: #0b0f19 !important; padding: 1rem !important; border-radius: 0.4rem; overflow: auto; }
+        .error-box { background: #1e293b; padding: 1rem; border-radius: 0.4rem; margin-top: 1rem; }
+        .summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:1rem; margin-bottom:2rem; }
+        .summary-card { background:var(--bg-card); border:1px solid var(--border); border-radius:.5rem; padding:1rem; }
+        .bar-row { display:grid; grid-template-columns:70px 1fr 24px; gap:.5rem; align-items:center; margin:.45rem 0; font-size:.85rem; }
+        .bar { height:10px; background:var(--bg-accent); border-radius:99px; overflow:hidden; }
+        .bar i { display:block; height:100%; background:var(--primary); }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-container">
+            <div><h1>VLD Analysis Report</h1><p>VulnerableBank.sol | 20260803_010958</p></div>
+        </div>
+    </header>
+    <main class="main-container">
+        <div class="stats-grid">
+            <div class="stat-card"><div class="stat-label">Overall Risk</div><div class="stat-value">High 56/100</div></div>
+            <div class="stat-card"><div class="stat-label">Total</div><div class="stat-value">7</div></div>
+            <div class="stat-card"><div class="stat-label">True Positives</div><div class="stat-value">7</div></div>
+            <div class="stat-card"><div class="stat-label">Potential False Positives</div><div class="stat-value">0</div></div>
+            <div class="stat-card"><div class="stat-label">Generated PoCs</div><div class="stat-value">0</div></div>
+            <div class="stat-card"><div class="stat-label">Compiled</div><div class="stat-value">0</div></div>
+            <div class="stat-card"><div class="stat-label">Executed</div><div class="stat-value">0</div></div>
+            <div class="stat-card"><div class="stat-label">Successful</div><div class="stat-value" style="color:var(--low-conf)">0</div></div>
+        </div>
+        <div class="summary-grid">
+            <section class="summary-card"><h3>Executive Summary</h3><p>7 consolidated finding(s), 0 duplicate(s) merged. Overall risk is <strong>High</strong>.</p><h4>Top Risks</h4><ol><li>access_control — Critical (93/100)</li><li>dangerous_selfdestruct — Critical (91/100)</li><li>REENTRANCY — High (60/100)</li><li>UNCHECKED_LOW_LEVEL_CALLS — Medium (38/100)</li><li>BUSINESS_LOGIC — Medium (38/100)</li></ol></section>
+            <section class="summary-card"><h3>Severity Distribution</h3><div class='bar-row'><span>Critical</span><div class='bar'><i style='width:29%'></i></div><b>2</b></div><div class='bar-row'><span>High</span><div class='bar'><i style='width:14%'></i></div><b>1</b></div><div class='bar-row'><span>Medium</span><div class='bar'><i style='width:57%'></i></div><b>4</b></div><div class='bar-row'><span>Low</span><div class='bar'><i style='width:0%'></i></div><b>0</b></div><h3>Confidence Distribution</h3><div class='bar-row'><span>High</span><div class='bar'><i style='width:71%'></i></div><b>5</b></div><div class='bar-row'><span>Medium</span><div class='bar'><i style='width:29%'></i></div><b>2</b></div><div class='bar-row'><span>Low</span><div class='bar'><i style='width:0%'></i></div><b>0</b></div></section>
+            <section class="summary-card"><h3>Performance Dashboard</h3><p>Tokens: 9,935</p><p>Runtime: 699.88s</p><p>Tokens/finding: 1419.3; time/finding: 99.98s</p><p>Average repairs: 0.00</p><p>Compile success: 0.0%</p><p>Execution success: 0.0%</p><p>Compilation failures: 7; execution failures: 0</p><h4>Agent Timeline</h4><ul><li>initialization: 0.00s</li><li>static_analysis: 0.27s</li><li>llm_analysis: 2.42s</li><li>analyzer_agent: 34.21s</li><li>skeptic_agent: 50.10s</li><li>exploiter_agent: 35.35s</li><li>generator_agent: 520.44s</li><li>exploit_runner: 57.08s</li><li>export: 0.01s</li></ul></section>
+            <section class="summary-card"><h3>Recommended Fixes</h3><ul><li><strong>Reentrancy:</strong> Use checks-effects-interactions pattern, ReentrancyGuard.</li><li><strong>Access Control:</strong> Use modifiers (e.g. <code>onlyOwner</code>), check roles properly.</li><li><strong>Unchecked Returns:</strong> Check return values of external calls.</li><li><strong>General:</strong> Conduct thorough testing and consider professional audits.</li></ul><p><strong>Audit conclusion:</strong> Address Critical/High findings first, then re-run generated PoCs and regression tests.</p></section>
+        </div>
+        <div class="report-layout">
+            <div class="sidebar"><h3>Findings</h3><div class="sidebar-list">
+        <div class="sidebar-item" onclick="showVulnerability(1)">
+            <span class="sidebar-title">access_control</span>
+            <span class="badge conf-high">Conf: 0.93</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(2)">
+            <span class="sidebar-title">REENTRANCY</span>
+            <span class="badge conf-high">Conf: 0.92</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(3)">
+            <span class="sidebar-title">dangerous_selfdestruct</span>
+            <span class="badge conf-high">Conf: 0.91</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(4)">
+            <span class="sidebar-title">UNCHECKED_LOW_LEVEL_CALLS</span>
+            <span class="badge conf-high">Conf: 0.83</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(5)">
+            <span class="sidebar-title">BUSINESS_LOGIC</span>
+            <span class="badge conf-high">Conf: 0.83</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(6)">
+            <span class="sidebar-title">DENIAL_OF_SERVICE</span>
+            <span class="badge conf-high">Conf: 0.78</span>
+        </div>
+        
+        <div class="sidebar-item" onclick="showVulnerability(7)">
+            <span class="sidebar-title">timestamp_dependence</span>
+            <span class="badge conf-high">Conf: 0.76</span>
+        </div>
+        </div></div>
+            <div class="content-panel">
+        <div id="vuln-details-1" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>access_control</h3>
+                <span class="badge conf-high">Confidence: 0.93</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> transferOwnership(address)</p>
+                    <p><strong>Risk:</strong> Critical (93/100) | <strong>Calibrated Confidence:</strong> 0.93</p>
+                    <p><strong>Skeptic Verdict:</strong> INSUFFICIENT_EVIDENCE | <strong>Merged Findings:</strong> 0</p>
+                    <p><strong>Deterministic Evidence:</strong> Confirmed by function-scoped deterministic source analysis.</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-1')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-1')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-1" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">Deterministic source evidence found in transferOwnership(address).</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>The `transferOwnership` function allows any user to transfer ownership without proper authorization. This means that any address can potentially become the new owner of the contract.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function transferOwnership(address newOwner) external {
+        owner = newOwner;
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-1" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span> | <strong>Compiled:</strong> ❌ | <strong>Executed:</strong> ❌</p>
+                <p><strong>Gas Usage:</strong> None | <strong>Repair Attempts:</strong> 0</p>
+                <div class='error-box'><h5>Compiler Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 84.45ms
+
+STDERR:
+Error: Compiler run failed:
+Error (2314): Expected ';' but got '('
+  --> test/Candidate.t.sol:45:21:
+   |
+45 |         log balances(owner);
+   |                     ^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (2314): Expected ';' but got '('
+  --> test/Candidate.t.sol:45:21:
+   |
+45 |         log balances(owner);
+   |                     ^
+</code></pre></div><div class='error-box'><h5>Runtime Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 84.45ms
+
+STDERR:
+Error: Compiler run failed:
+Error (2314): Expected ';' but got '('
+  --> test/Candidate.t.sol:45:21:
+   |
+45 |         log balances(owner);
+   |                     ^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (2314): Expected ';' but got '('
+  --> test/Candidate.t.sol:45:21:
+   |
+45 |         log balances(owner);
+   |                     ^
+</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Deploy a simple smart contract with the vulnerable transferOwnership function</li><li>Step 2: Create two accounts, one as the current owner and another as an attacker</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Confirm the current owner can call the transferOwnership function to change ownership</li><li>Step 2: Attempt to have the attacker call the transferOwnership function to take over ownership</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: Explain that any account can call the transferOwnership function without proper access control</li><li>Step 2: Suggest implementing a modifier to restrict the function to only the current owner, e.g., modifier onlyOwner() { require(msg.sender == owner, 'Not the owner'); }</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-2" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>REENTRANCY</h3>
+                <span class="badge conf-high">Confidence: 0.92</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> withdraw(uint256)</p>
+                    <p><strong>Risk:</strong> High (60/100) | <strong>Calibrated Confidence:</strong> 0.92</p>
+                    <p><strong>Skeptic Verdict:</strong> INSUFFICIENT_EVIDENCE | <strong>Merged Findings:</strong> 0</p>
+                    <p><strong>Deterministic Evidence:</strong> 1. User initiates a `withdraw` transaction transferring amount X.
+2. Malicious contract sends a small amount to `msg.sender`, triggering `fallback` or `receive`.
+3. `msg.sender` calls another function on the malicious contract, initiating another reentrancy cycle.
+4. Reentrancy continues indefinitely until user's balance is exhausted.</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-2')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-2')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-2" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The `withdraw` function makes an external call to the user's address (`msg.sender.call{value: amount}()`) after updating the state variables (`balances[msg.sender] -= amount`). This violates the checks-effects-interactions pattern, leaving room for a reentrancy attack.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>The `withdraw` function uses the checks-effects-interactions pattern correctly by updating state variables before making an external call. The reentrancy vulnerability claimed is unfounded.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function withdraw(uint256 amount) external {
+        require(balances[msg.sender] >= amount);
+
+        (bool success,) = msg.sender.call{value: amount}("");
+
+        require(success);
+
+        balances[msg.sender] -= amount;
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-2" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span> | <strong>Compiled:</strong> ❌ | <strong>Executed:</strong> ❌</p>
+                <p><strong>Gas Usage:</strong> None | <strong>Repair Attempts:</strong> 0</p>
+                <div class='error-box'><h5>Compiler Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 506.10ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:14:34:
+   |
+14 |     function withdraw() external override {
+   |                                  ^^^^^^^^
+
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:33:29:
+   |
+33 |     function setUp() public override {
+   |                             ^^^^^^^^
+
+Warning (5159): "selfdestruct" has been deprecated. The underlying opcode will eventually undergo breaking changes, and its use is not recommended.
+  --> src/VulnerableBank.sol:39:9:
+   |
+39 |         selfdestruct(payable(msg.sender));
+   |         ^^^^^^^^^^^^
+
+Warning (9302): Return value of low-level calls not used.
+  --> src/VulnerableBank.sol:55:9:
+   |
+55 |         to.call{value: amount}("");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error (9582): Member "setUp" not found or not visible after argument-dependent lookup in type(contract super ExploitTest).
+  --> test/Candidate.t.sol:34:9:
+   |
+34 |         super.setUp();
+   |         ^^^^^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:14:34:
+   |
+14 |     function withdraw() external override {
+   |                                  ^^^^^^^^
+
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:33:29:
+   |
+33 |     function setUp() public override {
+   |                             ^^^^^^^^
+
+Warning (5159): "selfdestruct" has been deprecated. The underlying opcode will eventually undergo breaking changes, and its use is not recommended.
+  --> src/VulnerableBank.sol:39:9:
+   |
+39 |         selfdestruct(payable(msg.sender));
+   |         ^^^^^^^^^^^^
+
+Warning (9302): Return value of low-level calls not used.
+  --> src/VulnerableBank.sol:55:9:
+   |
+55 |         to.call{value: amount}("");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error (9582): Member "setUp" not found or not visible after argument-dependent lookup in type(contract super ExploitTest).
+  --> test/Candidate.t.sol:34:9:
+   |
+34 |         super.setUp();
+   |         ^^^^^^^^^^^
+</code></pre></div><div class='error-box'><h5>Runtime Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 506.10ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:14:34:
+   |
+14 |     function withdraw() external override {
+   |                                  ^^^^^^^^
+
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:33:29:
+   |
+33 |     function setUp() public override {
+   |                             ^^^^^^^^
+
+Warning (5159): "selfdestruct" has been deprecated. The underlying opcode will eventually undergo breaking changes, and its use is not recommended.
+  --> src/VulnerableBank.sol:39:9:
+   |
+39 |         selfdestruct(payable(msg.sender));
+   |         ^^^^^^^^^^^^
+
+Warning (9302): Return value of low-level calls not used.
+  --> src/VulnerableBank.sol:55:9:
+   |
+55 |         to.call{value: amount}("");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error (9582): Member "setUp" not found or not visible after argument-dependent lookup in type(contract super ExploitTest).
+  --> test/Candidate.t.sol:34:9:
+   |
+34 |         super.setUp();
+   |         ^^^^^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:14:34:
+   |
+14 |     function withdraw() external override {
+   |                                  ^^^^^^^^
+
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:33:29:
+   |
+33 |     function setUp() public override {
+   |                             ^^^^^^^^
+
+Warning (5159): "selfdestruct" has been deprecated. The underlying opcode will eventually undergo breaking changes, and its use is not recommended.
+  --> src/VulnerableBank.sol:39:9:
+   |
+39 |         selfdestruct(payable(msg.sender));
+   |         ^^^^^^^^^^^^
+
+Warning (9302): Return value of low-level calls not used.
+  --> src/VulnerableBank.sol:55:9:
+   |
+55 |         to.call{value: amount}("");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error (9582): Member "setUp" not found or not visible after argument-dependent lookup in type(contract super ExploitTest).
+  --> test/Candidate.t.sol:34:9:
+   |
+34 |         super.setUp();
+   |         ^^^^^^^^^^^
+</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Fund the target and deploy a re-entering receiver.</li></ul>
+                <h5>Execution</h5><ul><li>Deposit through the receiver, then call withdraw to re-enter before the balance update.</li></ul>
+                <h5>Validation</h5><ul><li>Assert that the receiver withdrew more than its original deposit.</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-3" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>dangerous_selfdestruct</h3>
+                <span class="badge conf-high">Confidence: 0.91</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> destroy()</p>
+                    <p><strong>Risk:</strong> Critical (91/100) | <strong>Calibrated Confidence:</strong> 0.91</p>
+                    <p><strong>Skeptic Verdict:</strong> INSUFFICIENT_EVIDENCE | <strong>Merged Findings:</strong> 0</p>
+                    <p><strong>Deterministic Evidence:</strong> Confirmed by function-scoped deterministic source analysis.</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-3')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-3')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-3" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">Deterministic source evidence found in destroy().</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>The `destroy()` function does not check if the caller is authorized to destroy the contract. This means that any user can potentially take over the entire contract and its funds.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function destroy() external {
+        selfdestruct(payable(msg.sender));
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-3" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span> | <strong>Compiled:</strong> ❌ | <strong>Executed:</strong> ❌</p>
+                <p><strong>Gas Usage:</strong> None | <strong>Repair Attempts:</strong> 0</p>
+                <div class='error-box'><h5>Compiler Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 184.53ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:25:18:
+   |
+25 |         assertGt(balanceOf(attacker), startingBalance(attacker), "Attacker should receive funds from the contract");
+   |                  ^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:25:39:
+   |
+25 |         assertGt(balanceOf(attacker), startingBalance(attacker), "Attacker should receive funds from the contract");
+   |                                       ^^^^^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:28:9:
+   |
+28 |         log_balance(attacker);
+   |         ^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:29:9:
+   |
+29 |         log_balance(address(this));
+   |         ^^^^^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:25:18:
+   |
+25 |         assertGt(balanceOf(attacker), startingBalance(attacker), "Attacker should receive funds from the contract");
+   |                  ^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:25:39:
+   |
+25 |         assertGt(balanceOf(attacker), startingBalance(attacker), "Attacker should receive funds from the contract");
+   |                                       ^^^^^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:28:9:
+   |
+28 |         log_balance(attacker);
+   |         ^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:29:9:
+   |
+29 |         log_balance(address(this));
+   |         ^^^^^^^^^^^
+</code></pre></div><div class='error-box'><h5>Runtime Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 184.53ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:25:18:
+   |
+25 |         assertGt(balanceOf(attacker), startingBalance(attacker), "Attacker should receive funds from the contract");
+   |                  ^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:25:39:
+   |
+25 |         assertGt(balanceOf(attacker), startingBalance(attacker), "Attacker should receive funds from the contract");
+   |                                       ^^^^^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:28:9:
+   |
+28 |         log_balance(attacker);
+   |         ^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:29:9:
+   |
+29 |         log_balance(address(this));
+   |         ^^^^^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:25:18:
+   |
+25 |         assertGt(balanceOf(attacker), startingBalance(attacker), "Attacker should receive funds from the contract");
+   |                  ^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:25:39:
+   |
+25 |         assertGt(balanceOf(attacker), startingBalance(attacker), "Attacker should receive funds from the contract");
+   |                                       ^^^^^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:28:9:
+   |
+28 |         log_balance(attacker);
+   |         ^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:29:9:
+   |
+29 |         log_balance(address(this));
+   |         ^^^^^^^^^^^
+</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Create a test environment that demonstrates the vulnerability</li><li>Step 2: Prepare a contract with the dangerous_selfdestruct() function</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Deploy the vulnerable contract to the test environment</li><li>Step 2: Perform an internal call or transaction to trigger the destroy() function</li><li>Step 3: Monitor the balance of the contract and sender's account after calling destroy()</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: Explain that selfdestruct() sends all funds in the contract to the specified address, potentially leading to unintended funds transfer and loss</li><li>Step 2: Show how developers can fix this by removing the selfdestruct call or replacing it with a safer alternative, such as a withdraw function</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-4" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>UNCHECKED_LOW_LEVEL_CALLS</h3>
+                <span class="badge conf-high">Confidence: 0.83</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> unsafeSend(address,uint256)</p>
+                    <p><strong>Risk:</strong> Medium (38/100) | <strong>Calibrated Confidence:</strong> 0.83</p>
+                    <p><strong>Skeptic Verdict:</strong> INSUFFICIENT_EVIDENCE | <strong>Merged Findings:</strong> 0</p>
+                    <p><strong>Deterministic Evidence:</strong> 1. Caller invokes `unsafeSend` with an amount X.
+2. If the target address is controlled by an attacker, it may send all received ether back to the caller (e.g., in a Ponzi scheme).
+3. The original sender consumes all gas due to the fallback function's recursive calls.</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-4')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-4')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-4" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The `unsafeSend` function makes an external call to a user-controlled address (`to.call{value: amount}()`) without checking the return value. This could lead to unintended behavior or loss of funds if the recipient contract's fallback `receive` function consumes all gas.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>The `unsafeSend` function makes an external call to a user-controlled address without checking the return value. If the recipient contract's fallback `receive` function is malicious and transfers all gas, it could lead to the sender losing funds.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function unsafeSend(address payable to, uint256 amount) external {
+        to.call{value: amount}("");
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-4" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span> | <strong>Compiled:</strong> ❌ | <strong>Executed:</strong> ❌</p>
+                <p><strong>Gas Usage:</strong> None | <strong>Repair Attempts:</strong> 0</p>
+                <div class='error-box'><h5>Compiler Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 169.50ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:23:9:
+   |
+23 |         fundAccount(owner, 1 ether); // Fund the owner to interact with the contract
+   |         ^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:27:26:
+   |
+27 |         address sender = getAddress(0);
+   |                          ^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:28:9:
+   |
+28 |         fundAccount(sender, 2 ether);
+   |         ^^^^^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:23:9:
+   |
+23 |         fundAccount(owner, 1 ether); // Fund the owner to interact with the contract
+   |         ^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:27:26:
+   |
+27 |         address sender = getAddress(0);
+   |                          ^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:28:9:
+   |
+28 |         fundAccount(sender, 2 ether);
+   |         ^^^^^^^^^^^
+</code></pre></div><div class='error-box'><h5>Runtime Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 169.50ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:23:9:
+   |
+23 |         fundAccount(owner, 1 ether); // Fund the owner to interact with the contract
+   |         ^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:27:26:
+   |
+27 |         address sender = getAddress(0);
+   |                          ^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:28:9:
+   |
+28 |         fundAccount(sender, 2 ether);
+   |         ^^^^^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:23:9:
+   |
+23 |         fundAccount(owner, 1 ether); // Fund the owner to interact with the contract
+   |         ^^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:27:26:
+   |
+27 |         address sender = getAddress(0);
+   |                          ^^^^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:28:9:
+   |
+28 |         fundAccount(sender, 2 ether);
+   |         ^^^^^^^^^^^
+</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Create a simple recipient contract that will consume all gas in the fallback function</li><li>Step 2: Deploy a smart contract with the vulnerable `unsafeSend` function</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Send Ether to the vulnerable Smart Contract from an account (let's call it Sender)</li><li>Step 2: Call the `sendEther` function of the vulnerable Smart Contract, passing the address of the recipient contract and a non-zero amount</li><li>Step 3: Observe that while the Ether is sent successfully, the transaction might fail or behave unpredictably due to gas consumption</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: Explain that the `unsafeSend` function does not check the return value of the low-level call, which can lead to unintended behavior or loss of funds</li><li>Step 2: Show how developers can fix this vulnerability by implementing a proper check on the return value of the external call</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-5" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>BUSINESS_LOGIC</h3>
+                <span class="badge conf-high">Confidence: 0.83</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> transferOwnership(address)</p>
+                    <p><strong>Risk:</strong> Medium (38/100) | <strong>Calibrated Confidence:</strong> 0.83</p>
+                    <p><strong>Skeptic Verdict:</strong> INSUFFICIENT_EVIDENCE | <strong>Merged Findings:</strong> 0</p>
+                    <p><strong>Deterministic Evidence:</strong> 1. Attacker calls `transferOwnership` with their malicious address.
+2. NewOwner becomes the new owner, giving the attacker full control of the contract.</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-5')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-5')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-5" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The `owner` address is directly mutable by anyone through the `transferOwnership` function without a zero-check for newOwner. If the new owner becomes an attacker, they can take over contract operations.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>The `transferOwnership` function allows any user to transfer ownership without a zero-check for the new owner. This means that if the new owner becomes an attacker, they can potentially take over contract operations.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function transferOwnership(address newOwner) external {
+        owner = newOwner;
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-5" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span> | <strong>Compiled:</strong> ❌ | <strong>Executed:</strong> ❌</p>
+                <p><strong>Gas Usage:</strong> None | <strong>Repair Attempts:</strong> 0</p>
+                <div class='error-box'><h5>Compiler Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 537.48ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:12:29:
+   |
+12 |     function setUp() public override {
+   |                             ^^^^^^^^
+
+Warning (5159): "selfdestruct" has been deprecated. The underlying opcode will eventually undergo breaking changes, and its use is not recommended.
+  --> src/VulnerableBank.sol:39:9:
+   |
+39 |         selfdestruct(payable(msg.sender));
+   |         ^^^^^^^^^^^^
+
+Warning (9302): Return value of low-level calls not used.
+  --> src/VulnerableBank.sol:55:9:
+   |
+55 |         to.call{value: amount}("");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error (9582): Member "logBalances" not found or not visible after argument-dependent lookup in modifier ().
+  --> test/Candidate.t.sol:34:9:
+   |
+34 |         balanceLog.logBalances(usersWithBalance, "Before Exploit");
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:12:29:
+   |
+12 |     function setUp() public override {
+   |                             ^^^^^^^^
+
+Warning (5159): "selfdestruct" has been deprecated. The underlying opcode will eventually undergo breaking changes, and its use is not recommended.
+  --> src/VulnerableBank.sol:39:9:
+   |
+39 |         selfdestruct(payable(msg.sender));
+   |         ^^^^^^^^^^^^
+
+Warning (9302): Return value of low-level calls not used.
+  --> src/VulnerableBank.sol:55:9:
+   |
+55 |         to.call{value: amount}("");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error (9582): Member "logBalances" not found or not visible after argument-dependent lookup in modifier ().
+  --> test/Candidate.t.sol:34:9:
+   |
+34 |         balanceLog.logBalances(usersWithBalance, "Before Exploit");
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+</code></pre></div><div class='error-box'><h5>Runtime Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 537.48ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:12:29:
+   |
+12 |     function setUp() public override {
+   |                             ^^^^^^^^
+
+Warning (5159): "selfdestruct" has been deprecated. The underlying opcode will eventually undergo breaking changes, and its use is not recommended.
+  --> src/VulnerableBank.sol:39:9:
+   |
+39 |         selfdestruct(payable(msg.sender));
+   |         ^^^^^^^^^^^^
+
+Warning (9302): Return value of low-level calls not used.
+  --> src/VulnerableBank.sol:55:9:
+   |
+55 |         to.call{value: amount}("");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error (9582): Member "logBalances" not found or not visible after argument-dependent lookup in modifier ().
+  --> test/Candidate.t.sol:34:9:
+   |
+34 |         balanceLog.logBalances(usersWithBalance, "Before Exploit");
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7792): Function has override specified but does not override anything.
+  --> test/Candidate.t.sol:12:29:
+   |
+12 |     function setUp() public override {
+   |                             ^^^^^^^^
+
+Warning (5159): "selfdestruct" has been deprecated. The underlying opcode will eventually undergo breaking changes, and its use is not recommended.
+  --> src/VulnerableBank.sol:39:9:
+   |
+39 |         selfdestruct(payable(msg.sender));
+   |         ^^^^^^^^^^^^
+
+Warning (9302): Return value of low-level calls not used.
+  --> src/VulnerableBank.sol:55:9:
+   |
+55 |         to.call{value: amount}("");
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Error (9582): Member "logBalances" not found or not visible after argument-dependent lookup in modifier ().
+  --> test/Candidate.t.sol:34:9:
+   |
+34 |         balanceLog.logBalances(usersWithBalance, "Before Exploit");
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Deploy a simple smart contract with the vulnerable `transferOwnership` function</li><li>Step 2: Create two accounts: one for the initial owner and another for the attacker</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Execute a transaction to transfer ownership from the initial owner to an attacker</li><li>Step 2: Verify that the ownership has been transferred successfully</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: Explain how the lack of zero-check in `transferOwnership` function allows unauthorized transfers</li><li>Step 2: Provide a corrected version of the `transferOwnership` function that includes a zero-check, e.g., check if the new owner address is not the zero address</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-6" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>DENIAL_OF_SERVICE</h3>
+                <span class="badge conf-high">Confidence: 0.78</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> emergencyWithdraw()</p>
+                    <p><strong>Risk:</strong> Medium (36/100) | <strong>Calibrated Confidence:</strong> 0.78</p>
+                    <p><strong>Skeptic Verdict:</strong> INSUFFICIENT_EVIDENCE | <strong>Merged Findings:</strong> 0</p>
+                    <p><strong>Deterministic Evidence:</strong> 1. Attackers initiate rapid calls to `emergencyWithdraw`.
+2. Network congestion occurs, causing the bank to cease processing other transactions until emergency withdrawals stop.</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-6')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-6')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-6" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">The `emergencyWithdraw` function allows any user to withdraw all funds by calling it. If an attacker were to repeatedly call this function, the bank's operations could become unresponsive due to excessive gas consumption.</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>The `emergencyWithdraw` function allows any user to withdraw all funds. This could cause denial of service if attackers repeatedly call this function and consume excessive gas.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function emergencyWithdraw() external {
+        payable(msg.sender).transfer(address(this).balance);
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-6" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span> | <strong>Compiled:</strong> ❌ | <strong>Executed:</strong> ❌</p>
+                <p><strong>Gas Usage:</strong> None | <strong>Repair Attempts:</strong> 0</p>
+                <div class='error-box'><h5>Compiler Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 171.59ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:41:13:
+   |
+41 |             balance(attacker),
+   |             ^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:42:13:
+   |
+42 |             balance(anotherAttacker),
+   |             ^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:41:13:
+   |
+41 |             balance(attacker),
+   |             ^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:42:13:
+   |
+42 |             balance(anotherAttacker),
+   |             ^^^^^^^
+</code></pre></div><div class='error-box'><h5>Runtime Diagnostics</h5><pre><code>Forge compiler failure:
+STDOUT:
+Compiling 22 files with Solc 0.8.20
+Solc 0.8.20 finished in 171.59ms
+
+STDERR:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:41:13:
+   |
+41 |             balance(attacker),
+   |             ^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:42:13:
+   |
+42 |             balance(anotherAttacker),
+   |             ^^^^^^^
+
+DIAGNOSTIC:
+Error: Compiler run failed:
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:41:13:
+   |
+41 |             balance(attacker),
+   |             ^^^^^^^
+
+Error (7576): Undeclared identifier.
+  --> test/Candidate.t.sol:42:13:
+   |
+42 |             balance(anotherAttacker),
+   |             ^^^^^^^
+</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Deploy a simple bank contract with an `emergencyWithdraw` function that allows anyone to withdraw all funds.</li><li>Step 2: Create multiple accounts controlled by the trainer and students.</li></ul>
+                <h5>Execution</h5><ul><li>Step 1a: Transfer a small amount of Ether (ETH) to the bank contract.</li><li>Step 1b: Demonstrate the normal behavior where users can access their funds through regular withdrawal functions.</li><li>Step 2: Simulate an attacker repeatedly calling the `emergencyWithdraw` function from each controlled account.</li><li>Step 3a: Monitor gas consumption and observe the impact on the gas limit and transaction costs.</li></ul>
+                <h5>Validation</h5><ul><li>Step 1a: Explain that the `emergencyWithdraw` function allows anyone to withdraw all funds immediately, potentially disrupting normal operations.</li><li>Step la: Demonstrate how this rapid withdrawal can cause high gas usage, nearing or exceeding the block gas limit, thus blocking further transactions.</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="vuln-details-7" class="vuln-details-card" style="display: none;">
+            <div class="details-header">
+                <h3>timestamp_dependence</h3>
+                <span class="badge conf-high">Confidence: 0.76</span>
+            </div>
+            <div class="details-body">
+                <div class="meta-section">
+                    <p><strong>Affected Functions:</strong> random()</p>
+                    <p><strong>Risk:</strong> Medium (35/100) | <strong>Calibrated Confidence:</strong> 0.76</p>
+                    <p><strong>Skeptic Verdict:</strong> INSUFFICIENT_EVIDENCE | <strong>Merged Findings:</strong> 0</p>
+                    <p><strong>Deterministic Evidence:</strong> Confirmed by function-scoped deterministic source analysis.</p>
+                </div>
+                
+                <div class="tabs-container">
+                    <div class="tab-buttons">
+                        <button class="tab-btn active" onclick="switchDetailTab(event, 'analysis-7')">Analysis</button>
+                        <button class="tab-btn" onclick="switchDetailTab(event, 'poc-7')">Proof of Concept</button>
+                    </div>
+                    
+                    <div id="analysis-7" class="detail-tab-content">
+                        <h4>Reasoning</h4>
+                        <div class="reasoning-text">Deterministic source evidence found in random().</div>
+                        
+                        <h4>Validation Reasoning</h4><div class='reasoning-text'>The `random()` function uses block.timestamp and block.prevrandao, which are both subject to manipulation by miners. This could make the function's output predictable or non-reproducible across nodes.</div>
+                        
+                        <h4>Code Snippet</h4>
+                        <pre><code class='language-solidity'>function random() external view returns (uint256) {
+        return uint256(
+            keccak256(
+                abi.encodePacked(
+                    block.timestamp,
+                    block.prevrandao,
+                    msg.sender
+                )
+            )
+        );
+    }</code></pre>
+                    </div>
+                    
+                    <div id="poc-7" class="detail-tab-content" style="display: none;">
+                        
+            <div class="poc-details">
+                <h4>PoC Details</h4>
+                <p><strong>File:</strong> <code></code></p>
+                <p><strong>Status:</strong> <span class='badge conf-low'>FAILED (Retries: 0)</span> | <strong>Compiled:</strong> ❌ | <strong>Executed:</strong> ❌</p>
+                <p><strong>Gas Usage:</strong> None | <strong>Repair Attempts:</strong> 0</p>
+                <div class='error-box'><h5>Compiler Diagnostics</h5><pre><code>Self-review: The `random()` function is not in the allowed target functions list.; The `unsafeSend(address,uint256)` function is not in the allowed target functions list.</code></pre></div><div class='error-box'><h5>Runtime Diagnostics</h5><pre><code>Self-review: The `random()` function is not in the allowed target functions list.; The `unsafeSend(address,uint256)` function is not in the allowed target functions list.</code></pre></div>
+                
+            <div class="exploit-plan">
+                <h4>Exploit Plan</h4>
+                <h5>Setup</h5><ul><li>Step 1: Create a test environment that demonstrates the vulnerability</li><li>Step 2: Prepare necessary contracts and accounts for the demonstration</li></ul>
+                <h5>Execution</h5><ul><li>Step 1: Demonstrate the normal contract behavior by calling the random() function multiple times within a short time frame to show consistent results.</li><li>Step 2: Simulate an attacker attempting to manipulate the block timestamp or prevrandao value to predict future outcomes of the random() call.</li></ul>
+                <h5>Validation</h5><ul><li>Step 1: Explain that the vulnerability arises from using block.timestamp as a seed in a deterministic pseudorandom number generator, which can be manipulated by miners (in case of a public chain like Ethereum) or by local node operators.</li><li>Step 2: Show how to fix this vulnerability by replacing block.timestamp with a truly random value generated off-chain, such as through an oracle service that provides cryptographic randomness.</li></ul>
+            </div>
+            
+                
+            </div>
+            
+                    </div>
+                </div>
+            </div>
+        </div>
+        </div>
+        </div>
+    </main>
+    <script>
+        function showVulnerability(idx) {
+            document.querySelectorAll('.vuln-details-card').forEach(c => c.style.display = 'none');
+            document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+            document.getElementById('vuln-details-' + idx).style.display = 'block';
+            document.querySelectorAll('.sidebar-list .sidebar-item')[idx-1].classList.add('active');
+        }
+        function switchDetailTab(e, id) {
+            const p = e.target.parentElement;
+            p.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+            const c = p.parentElement;
+            c.querySelectorAll('.detail-tab-content').forEach(tc => tc.style.display = 'none');
+            document.getElementById(id).style.display = 'block';
+        }
+        if (7 > 0) showVulnerability(1);
+    </script>
+</body>
+</html>

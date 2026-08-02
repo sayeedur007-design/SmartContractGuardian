@@ -31,10 +31,31 @@ def known_function_ids(function_details: Iterable[Dict[str, Any]]) -> Set[str]:
 
 
 def normalize_affected_functions(values: Iterable[Any], allowed: Set[str]) -> List[str]:
-    """Accept only exact canonical IDs; never silently map hallucinated names."""
+    """Normalize common LLM function references to one unambiguous known ID.
+
+    Bare names are accepted only when the analyzed contract has one overload
+    with that name, which preserves hallucination protection while accepting
+    forms such as ``Contract.withdraw`` and ``withdraw()``.
+    """
     normalized: List[str] = []
     for value in values or []:
         candidate = str(value).strip()
-        if candidate in allowed and candidate not in normalized:
-            normalized.append(candidate)
+        if not candidate:
+            continue
+        if candidate in allowed:
+            resolved = candidate
+        else:
+            short = candidate.rsplit(".", 1)[-1].replace(" ", "")
+            name = short.split("(", 1)[0]
+            matches = [function_id for function_id in allowed if function_id.split("(", 1)[0] == name]
+            # Exact short signature wins.  Otherwise resolve name-only and
+            # empty-parenthesis variants only when no overload is possible.
+            if short in allowed:
+                resolved = short
+            elif len(matches) == 1 and ("(" not in short or short.endswith("()")):
+                resolved = matches[0]
+            else:
+                continue
+        if resolved not in normalized:
+            normalized.append(resolved)
     return normalized
