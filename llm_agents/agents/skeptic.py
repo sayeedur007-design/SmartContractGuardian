@@ -52,49 +52,29 @@ class SkepticAgent:
             task = progress.add_task("Analyzing...")
 
             # Build prompts
-            system_prompt = """You are a highly critical, business-focused Smart Contract Security Auditor with real-world exploit experience.
-    Your role is to carefully evaluate initial vulnerability findings and provide a balanced assessment of their severity and exploitability.
+            system_prompt = """You are a skeptical Smart Contract Security Auditor. 
+Your job is to verify findings from a previous analyzer.
+Be extremely critical. Most findings might be false positives.
 
-    Consider these factors when reviewing each vulnerability:
-    1. Business logic context - How does this vulnerability interact with the specific business purpose of this contract?
-    2. Preconditions - What conditions must be met for this to be exploited?
-    3. Practical impact - What would be the consequence if exploited?
-    4. Implementation details - Is the code actually vulnerable in the way described?
-    5. Common vulnerability patterns - Does this match known vulnerability patterns?
+For each finding:
+1. Examine the contract source code carefully.
+2. Check if the vulnerability actually exists and is exploitable.
+3. Reject if the reasoning is flawed or the code handles the issue correctly.
+4. Provide a confidence score (0.0-1.0).
+5. Provide reasoning for your verdict.
 
-    For each alleged vulnerability, determine:
-      1) Is it a genuine vulnerability that warrants attention?
-      2) Give a REASONABLE confidence score using these guidelines:
-         - 0.0-0.2: Definitely not a vulnerability / false positive
-         - 0.3-0.5: Unlikely to be exploitable but worth noting
-         - 0.6-0.8: Likely a genuine concern requiring attention
-         - 0.9-1.0: Critical vulnerability with high certainty
-      3) Provide clear reasoning that supports your confidence score
-
-    Especially look for subtle business logic flaws that automated tools or pattern-matching might miss:
-    - Economic manipulation (arbitrage, price manipulation)
-    - Logical sequence exploits (state manipulation across transactions)
-    - Trust assumptions that conflict with incentives
-    - Edge cases in mathematical calculations
-    - Parameter bounds and invariant violations
-
-    It is okay to be more confident about business logic flaws, as these arise from pure reasoning from the previous agent.
-    You should carefully evaluate the categorized vulnerabilities as they arrise from pattern matching.
-
-    Output JSON exactly in the format:
+Return ONLY valid JSON in this format:
+{
+  "rechecked_vulnerabilities": [
     {
-      "rechecked_vulnerabilities": [
-        {
-          "original_idx": 0,
-          "skeptic_confidence": 0.0,
-          "validity_reasoning": "",
-          "evidence_lines": ["exact Solidity line or code excerpt"],
-          "verdict": "accepted or rejected"
-        },
-        ...
-      ]
+      "original_idx": 0,
+      "skeptic_confidence": 0.9,
+      "validity_reasoning": "Detailed reason why it is valid or invalid",
+      "evidence_lines": ["code snippet from contract"],
+      "verdict": "accepted"
     }
-            """
+  ]
+}"""
             user_prompt = f"=== CONTRACT SOURCE CODE ===\n{contract_source}\n\n=== REPORTED VULNERABILITIES ===\n"
             for idx, vuln in enumerate(vulnerabilities):
                 user_prompt += (
@@ -115,30 +95,32 @@ class SkepticAgent:
     """
             # Call LLM with appropriate message structure
             if self.model_config.supports_reasoning(self.model_name):
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ]
+                messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
             else:
-                messages = [
-                    {"role": "user", "content": system_prompt + user_prompt}
-                ]
+                messages = [{"role": "user", "content": system_prompt + user_prompt}]
 
             # Import token tracker
             from utils.token_tracker import token_tracker
             
-            if self.model_name == "claude-3-7-sonnet-latest":
-                resp = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    max_tokens=64000,
-                    extra_body={ "thinking": { "type": "enabled", "budget_tokens": 5000 } },
-                )
-            else:
-                resp = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages
-                )
+            try:
+                if self.model_name == "claude-3-7-sonnet-latest":
+                    resp = self.client.chat.completions.create(model=self.model_name, messages=messages, max_tokens=64000, extra_body={"thinking": {"type": "enabled", "budget_tokens": 5000}})
+                else:
+                    resp = self.client.chat.completions.create(model=self.model_name, messages=messages)
+            except Exception as exc:
+                # Analyzer findings backed by a deterministic source rule are
+                # still valid evidence; do not turn an Ollama outage into an
+                # empty audit report.
+                print_warning(f"Local skeptic unavailable; retaining analyzer confidence: {exc}")
+                fallback = []
+                for finding in vulnerabilities:
+                    item = dict(finding)
+                    item["skeptic_confidence"] = float(item.get("confidence_score", 0.0))
+                    item["validity_reasoning"] = "Retained because the local skeptic was unavailable."
+                    item["skeptic_status"] = "fallback_llm_unavailable"
+                    fallback.append(item)
+                progress.update(task, completed=True)
+                return fallback
                 
             # Track token usage
             if hasattr(resp, 'usage') and resp.usage:

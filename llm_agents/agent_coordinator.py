@@ -135,6 +135,9 @@ class AgentCoordinator:
             contract_info["source_code"], vulnerabilities, contract_info.get("function_details", [])
         )
 
+        # Extra deduplication after skeptic
+        rechecked_vulns = self.analyzer._deduplicate_vulnerabilities(rechecked_vulns)
+
         log_findings("Skeptic findings", rechecked_vulns)
 
         console.print("[bold green]✓ SkepticAgent: Completed verification[/bold green]")

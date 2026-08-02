@@ -62,33 +62,32 @@ class AnalyzerAgent:
                 # Build prompts
                 progress.update(task, description="Constructing analysis prompt...")
 
-                all_categories = self.vuln_categories.keys()
-                system_prompt = (
-                    "You are an expert smart contract security auditor with deep knowledge of DeFi protocols, web3 security, and Solidity. You MUST:\n"
-                    "1. First INDEPENDENTLY analyze the contract without relying on prior knowledge - use first principles reasoning\n"
-                    "2. After independent analysis, check for all these vulnerability categories:\n"
-                    + "\n".join([f"- {cat}" for cat in all_categories])
-                    + "\n3. Pay equal attention to BUSINESS LOGIC FLAWS that might not fit standard categories\n"
-                    "4. Consider how contract mechanisms can be manipulated for profit, especially:\n"
-                    "   - Transaction ordering manipulation (MEV, frontrunning, sandwiching)\n"
-                    "   - Economic attacks (price manipulation, flash loans, arbitrage)\n"
-                    "   - Governance manipulation (voting, delegation attacks)\n"
-                    "   - Access control issues or privileges that can be abused\n"
-                    "   - Mathematical invariants that can be broken\n"
-                    "5. Only after independent analysis, consider detection strategies from examples as supplementary guidance\n"
-                    "6. Return valid JSON with EXACT category names, but also include 'business_logic' for novel attack vectors\n"
-                )
                 user_prompt = self._construct_analysis_prompt(contract_info, relevant_docs)
 
-                # Call LLM
+                # Call the local LLM for broad review, but never discard
+                # deterministic evidence when the local service is unavailable.
                 progress.update(task, description="Analyzing with LLM...")
-                response_text = self._call_llm(system_prompt, user_prompt)
+                # Optimized system prompt for local 7B coder model
+                system_prompt = (
+                    "You are an expert smart contract security auditor. Analyze the provided Solidity contract for vulnerabilities.\n"
+                    "Focus on REENTRANCY, ACCESS CONTROL, BUSINESS LOGIC, ARITHMETIC, and DUSK-related issues.\n"
+                    "Return ONLY valid JSON in the specified format. Do not include markdown preamble.\n"
+                    "If you find multiple instances of the same vulnerability type, group them if appropriate but ensure distinct root causes are reported separately.\n"
+                    "Be concise in reasoning. Only report vulnerabilities you are highly confident in."
+                )
+                try:
+                    response_text = self._call_llm(system_prompt, user_prompt)
+                    vulnerabilities = self._parse_llm_response(response_text)
+                except Exception as exc:
+                    logger.warning("Local LLM analysis unavailable; continuing with deterministic findings: %s", exc)
+                    print_warning(f"Local LLM analysis unavailable; using verified static findings: {exc}")
+                    vulnerabilities = []
 
                 # Parse results
                 progress.update(task, description="Processing results...")
-                vulnerabilities = self._parse_llm_response(response_text)
                 vulnerabilities = self._add_deterministic_findings(vulnerabilities, contract_info)
                 vulnerabilities = self._validate_findings(vulnerabilities, contract_info)
+                vulnerabilities = self._deduplicate_vulnerabilities(vulnerabilities)
                 self._attach_code_snippets(vulnerabilities, contract_info)
 
                 progress.update(task, completed=True)
@@ -100,6 +99,28 @@ class AnalyzerAgent:
             traceback.print_exc()
             print_warning(f"Analysis error: {repr(e)}")
             return {"vulnerabilities": [], "error": repr(e)}
+
+    def _deduplicate_vulnerabilities(self, vulnerabilities: list) -> list:
+        """Remove redundant findings of the same type in the same functions."""
+        unique_findings = []
+        seen = set()
+        
+        for v in vulnerabilities:
+            v_type = v.get("vulnerability_type", "").lower()
+            # Sort affected functions for consistent keys
+            affected = sorted(v.get("affected_functions", []))
+            # Create a unique key based on type and affected functions
+            key = (v_type, tuple(affected))
+            
+            if key not in seen:
+                seen.add(key)
+                unique_findings.append(v)
+            else:
+                # If we've seen this type/function combo, maybe update reasoning if the new one is better?
+                # For now, just keep the first one found (usually highest confidence from LLM or deterministic)
+                pass
+                
+        return unique_findings
 
     def _build_query_text(self, contract_info: Dict) -> str:
         """Small summary of the user’s contract to retrieve related vulnerabilities."""

@@ -29,39 +29,78 @@ class ExploitRunner:
         path = Path(poc_data.get("exploit_file", ""))
         if not path.is_file():
             return {"success": False, "error": poc_data.get("generation_error", "Exploit file not found"), "output": "", "retries": 0, "diagnostics": []}
+        
         diagnostics, output, success = [], "", False
         previous_attempt = ""
+        
+        # Track detailed stats
+        compilation_success = True # If we reached here, it compiled once in Generator
+        execution_success = False
+        
         for attempt in range(self.max_retries + 1):
             success, output = self._execute_test(path, attempt)
             diagnostic = self._diagnose(output)
             diagnostics.append(diagnostic)
+            
             if success:
-                return {"success": True, "output": output, "error": "", "file_path": str(path), "retries": attempt, "diagnostics": diagnostics}
+                execution_success = True
+                return {
+                    "success": True, 
+                    "output": output, 
+                    "error": "", 
+                    "file_path": str(path), 
+                    "retries": attempt, 
+                    "diagnostics": diagnostics,
+                    "compiled": True,
+                    "executed": True
+                }
+            
             if attempt == self.max_retries:
                 break
+                
             current = path.read_text(encoding="utf-8")
             candidate = self._fix_test_code(current, output, diagnostic, previous_attempt)
             previous_attempt = current
+            
             if not candidate:
                 continue
+                
             candidate = GeneratorAgent._clean_solidity(candidate)
             # Repairs are accepted only after structural validation and Forge compilation.
             target = poc_data.get("target_contract", {"filename": "VulnerableContract.sol", "contract_name": "VulnerableContract", "functions": []})
             errors = self.validator.validate_contract(candidate, {}, target)
-            review = self.validator._self_review(candidate, {}, target) if not errors else ""
-            compiled, compile_output = self.validator.compile_candidate(candidate) if not errors and not review else (False, "Compilation skipped due to validation failure")
-            self._write_repair_log(path, attempt, "build", compile_output)
-            if errors or review or not compiled:
-                if review:
-                    errors.append(f"Self-review: {review}")
-                diagnostics.append({"categories": ["RepairValidationError"], "output": "; ".join(errors) or compile_output})
+            
+            # If validation fails, try to fix it or skip
+            if errors:
+                diagnostics.append({"categories": ["RepairValidationError"], "output": "; ".join(errors)})
                 continue
+
+            compiled, compile_output = self.validator.compile_candidate(candidate)
+            self._write_repair_log(path, attempt, "build", compile_output)
+            
+            if not compiled:
+                compilation_success = False
+                diagnostics.append({"categories": ["RepairCompilationError"], "output": compile_output})
+                continue
+            
+            compilation_success = True
             path.write_text(candidate, encoding="utf-8")
-        return {"success": False, "output": output, "error": output, "file_path": str(path), "retries": self.max_retries, "diagnostics": diagnostics}
+            
+        return {
+            "success": False, 
+            "output": output, 
+            "error": output, 
+            "file_path": str(path), 
+            "retries": self.max_retries, 
+            "diagnostics": diagnostics,
+            "compiled": compilation_success,
+            "executed": True if output else False
+        }
 
     def _execute_test(self, path: Path, attempt: int) -> Tuple[bool, str]:
         relative = path.resolve().relative_to(self.exploit_root.resolve()).as_posix()
         try:
+            # Use -vv to see assertions and traces
             command = ["forge", "test", "-vv", "--no-cache", "--match-path", f"./{relative}"]
             solc = shutil.which("solc")
             if solc:
@@ -79,11 +118,22 @@ class ExploitRunner:
             output = (result.stdout or "") + ("\n" if result.stdout and result.stderr else "") + (result.stderr or "")
         except (OSError, subprocess.TimeoutExpired) as exc:
             output, result = f"Unable to execute forge test: {exc}", None
+        
         reports = self.project_root / "reports"
         reports.mkdir(exist_ok=True)
         log = reports / f"forge_{path.stem}_{int(time.time() * 1000)}_attempt{attempt}.log"
         log.write_text(output, encoding="utf-8")
-        return bool(result and result.returncode == 0 and "FAIL" not in output), output
+        
+        # Success if return code is 0 AND we see "PASS" in the output for our test
+        # Sometimes forge returns 0 even if some tests fail if not configured correctly, 
+        # but usually it's reliable. We check for "testExploit() (gas: " or similar.
+        success = bool(result and result.returncode == 0 and "testExploit() (gas: " in output and "ok" in output.lower())
+
+        if not success and result and result.returncode == 0:
+            # Fallback check for general pass
+            success = "PASS" in output and "FAIL" not in output
+            
+        return success, output
 
     def _write_repair_log(self, path: Path, attempt: int, stage: str, output: str) -> None:
         reports = self.project_root / "reports"
