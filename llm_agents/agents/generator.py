@@ -95,36 +95,142 @@ class GeneratorAgent:
             # without an alias makes every generated PoC uncompilable.
             target_import = f'import {{Test as VulnerableBankTarget}} from "../src/{target["filename"]}";'
             target_type = "VulnerableBankTarget"
-        prompt = f"""ROLE
-You are a Solidity security engineer writing one self-contained, defensive Foundry regression test.
+        prompt = f"""
+You are an expert Solidity security researcher specializing in Foundry proof-of-concept generation.
 
-OBJECTIVE
-Produce a complete PoC test which demonstrates the reported issue against the supplied target contract and compiles in this Foundry repository.
+Your task is to generate ONE complete Forge test that compiles successfully.
 
-INPUT
-Target source file: {target['filename']}
-Target contract: {target['contract_name']}
-Reported vulnerability: {vulnerability.get('vulnerability_type', 'unknown')}
-Affected functions: {affected}
-Reasoning: {vulnerability.get('reasoning', '')}
-Exploit plan: {plan}
-Previous attempt feedback (attempt {attempt}):
+Return ONLY Solidity code.
+
+==============================
+TARGET CONTRACT
+==============================
+
+File:
+{target["filename"]}
+
+Contract:
+{target["contract_name"]}
+
+Available functions:
+
+{chr(10).join(target.get("functions", []))}
+
+==============================
+VULNERABILITY
+==============================
+
+Type:
+{vulnerability.get("vulnerability_type","")}
+
+Confidence:
+{vulnerability.get("confidence_score","")}
+
+Reasoning:
+{vulnerability.get("reasoning","")}
+
+Affected Functions:
+
+{affected}
+
+Relevant Solidity snippet:
+
+{vulnerability.get("code_snippet","")}
+
+==============================
+EXPLOIT PLAN
+==============================
+
+Setup Steps:
+{chr(10).join(plan.get("setup_steps", []))}
+
+Execution Steps:
+{chr(10).join(plan.get("execution_steps", []))}
+
+Validation Steps:
+{chr(10).join(plan.get("validation_steps", []))}
+
+==============================
+PREVIOUS FAILURES
+==============================
+
 {previous_failures}
 
-STRICT REQUIREMENTS
-- Include SPDX and pragma solidity.
-- Import `./basetest.sol` and this target import exactly: `{target_import}`.
-- Declare a test contract inheriting `BaseTestWithBalanceLog`.
-- Include non-empty `setUp()` and `testExploit()` functions.
-- `testExploit()` must use `balanceLog`; both setup or test must call `vm.deal`.
-- Use `vm.prank` or `vm.startPrank` for the attacker and include at least one
-  Foundry assertion proving the claimed impact.
-- Instantiate or otherwise use `{target_type}` and call the reported affected function when one is supplied.
-- Use only contracts/interfaces declared in this file or the two imports. Do not use placeholders, TODOs, ellipses, or fork RPCs.
-- Rewrite the entire contract; do not patch a prior response.
+==============================
+STRICT RULES
+==============================
 
-OUTPUT FORMAT
-RETURN ONLY SOLIDITY
+1. Return ONLY Solidity.
+
+2. Do NOT return JSON.
+
+3. Do NOT explain anything.
+
+4. Do NOT include markdown except optional ```solidity``` fences.
+
+5. Import exactly:
+
+import "./basetest.sol";
+{target_import}
+
+6. Inherit:
+
+contract PocTest is BaseTestWithBalanceLog
+
+7. Include BOTH functions:
+
+function setUp()
+
+function testExploit() public balanceLog
+
+8. Instantiate the target exactly as:
+
+{target_type} target;
+
+9. Deploy using:
+
+target = new {target_type}();
+
+10. Use vm.deal(...)
+
+11. Use vm.prank(...) or vm.startPrank(...)
+
+12. Include at least ONE Foundry assertion.
+
+13. Call ONLY functions that exist in the Available functions list.
+
+14. Never invent functions.
+
+15. Never call:
+
+balanceOf
+approve
+transfer
+transferFrom
+mint
+burn
+
+unless they appear in Available functions.
+
+16. If the contract handles ETH, use:
+
+address(target).balance
+
+or
+
+address(attacker).balance
+
+instead of ERC20 APIs.
+
+17. Generate a Forge test that compiles without modification.
+
+18. Use the affected function directly in the exploit.
+
+19. Never use placeholder code.
+
+20. Never reference contracts or state variables that do not exist.
+
+Return ONLY the Solidity source.
 """
         return self._clean_solidity(self._chat(prompt))
 
@@ -156,7 +262,11 @@ RETURN ONLY SOLIDITY
             errors.append("missing or empty setUp")
         if not test or not re.search(r"\S", self._without_comments(test)):
             errors.append("missing or empty testExploit")
-        if not re.search(r"function\s+testExploit\s*\([^)]*\)\s*(?:public|external)[^{]*\bbalanceLog\b", code):
+        # Solidity permits modifiers before or after visibility.  The old
+        # expression accepted only one ordering and rejected valid generated
+        # tests before Forge could compile them.
+        test_signature = re.search(r"function\s+testExploit\s*\([^)]*\)\s*([^\{]*)\{", code)
+        if not test_signature or not re.search(r"\bbalanceLog\b", test_signature.group(1)):
             errors.append("testExploit does not use balanceLog")
         if "vm.deal" not in code:
             errors.append("missing vm.deal")
@@ -168,6 +278,22 @@ RETURN ONLY SOLIDITY
             errors.append("target contract name is not used")
         source_functions = set(target.get("functions", []))
         affected = self._extract_relevant_functions(vulnerability)
+        for forbidden in [
+            "balanceOf(",
+            "approve(",
+            "transfer(",
+            "transferFrom(",
+            "mint(",
+            "burn("
+        ]:
+            if forbidden in code:
+                if not any(
+                    fn.startswith(forbidden[:-1])
+                    for fn in source_functions
+                ):
+                    errors.append(
+                        f"PoC calls nonexistent function {forbidden[:-1]}"
+                    )
         for function in affected:
             if source_functions and function not in source_functions:
                 errors.append(f"reported affected function does not exist: {function}")
@@ -236,7 +362,7 @@ RETURN ONLY SOLIDITY
                 contract = configured.get("name") or self._contract_name(source)
                 if contract:
                     return {"filename": path.name, "contract_name": contract, "functions": self._source_functions(source)}
-        return {"filename": "VulnerableContract.sol", "contract_name": "VulnerableContract", "functions": []}
+        raise RuntimeError("Unable to resolve target contract.")
 
     @staticmethod
     def _contract_name(source: str) -> Optional[str]:

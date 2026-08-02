@@ -4,8 +4,11 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 
 const VulnerabilitiesPanel = ({ vulnerabilities }) => {
   const [selectedVulnIndex, setSelectedVulnIndex] = useState(null);
+  const items = Array.isArray(vulnerabilities)
+    ? vulnerabilities.filter((vulnerability) => vulnerability && typeof vulnerability === "object")
+    : [];
 
-  if (!vulnerabilities || vulnerabilities.length === 0) {
+  if (items.length === 0) {
     return (
       <div className="bg-white p-6 rounded-lg shadow-md">
         <h2 className="text-xl font-semibold mb-4">Vulnerabilities</h2>
@@ -17,7 +20,7 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
   }
 
   const selectedVuln =
-    selectedVulnIndex !== null ? vulnerabilities[selectedVulnIndex] : null;
+    selectedVulnIndex !== null ? items[selectedVulnIndex] : null;
 
   // Function to get confidence level class
   const getConfidenceClass = (confidence) => {
@@ -36,18 +39,18 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
         <div className="lg:col-span-1 border rounded-md overflow-hidden">
           <div className="bg-gray-50 px-4 py-2 border-b">
             <h3 className="font-medium">
-              Vulnerabilities ({vulnerabilities.length})
+              Vulnerabilities ({items.length})
             </h3>
           </div>
           <div className="divide-y max-h-96 overflow-y-auto">
-            {vulnerabilities.map((vuln, index) => (
+            {items.map((vuln, index) => (
               <div
                 key={index}
                 className={`px-4 py-3 cursor-pointer hover:bg-gray-50 ${selectedVulnIndex === index ? "bg-blue-50" : ""}`}
                 onClick={() => setSelectedVulnIndex(index)}
               >
                 <div className="flex justify-between items-center">
-                  <span className="font-medium">{vuln.vulnerability_type}</span>
+                  <span className="font-medium">{vuln.vulnerability_type || "Unknown vulnerability"}</span>
                   <span
                     className={`text-xs px-2 py-1 rounded-full ${getConfidenceClass(vuln.skeptic_confidence || 0)}`}
                   >
@@ -55,7 +58,7 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
                   </span>
                 </div>
                 <div className="text-sm text-gray-500 truncate mt-1">
-                  {vuln.affected_functions && vuln.affected_functions.length > 0
+                  {Array.isArray(vuln.affected_functions) && vuln.affected_functions.length > 0
                     ? vuln.affected_functions.join(", ")
                     : "No specific functions"}
                 </div>
@@ -70,7 +73,7 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
             <div>
               <div className="bg-gray-50 px-4 py-2 border-b">
                 <h3 className="font-medium">
-                  {selectedVuln.vulnerability_type}
+                  {selectedVuln.vulnerability_type || "Unknown vulnerability"}
                 </h3>
               </div>
               <div className="p-4 space-y-4 max-h-96 overflow-y-auto">
@@ -114,7 +117,7 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
                   <h4 className="text-sm font-medium text-gray-700">
                     Affected Functions
                   </h4>
-                  {selectedVuln.affected_functions &&
+                  {Array.isArray(selectedVuln.affected_functions) &&
                   selectedVuln.affected_functions.length > 0 ? (
                     <ul className="list-disc pl-5 text-sm text-gray-600 mt-1">
                       {selectedVuln.affected_functions.map((func, idx) => (

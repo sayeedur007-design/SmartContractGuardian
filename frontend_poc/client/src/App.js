@@ -8,6 +8,7 @@ import VulnerabilitiesPanel from "./components/VulnerabilitiesPanel";
 import ExploitsPanel from "./components/ExploitsPanel";
 import ProjectContextPanel from "./components/ProjectContextPanel";
 import PerformanceMetricsPanel from "./components/PerformanceMetricsPanel";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { io } from "socket.io-client";
 import {
   fetchContractStatus,
@@ -18,6 +19,14 @@ import "./App.css";
 
 // Initialize socket.io client - make sure port matches your backend
 const socket = io("http://localhost:3000");
+const asObject = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : null;
+
+const validateCompletedResponse = (payload) => {
+  const response = asObject(payload);
+  const results = asObject(response?.results);
+  if (!results) throw new Error("The server returned an incomplete analysis result.");
+  return { results, performanceMetrics: asObject(response.performance_metrics) };
+};
 
 function App() {
   const [currentJob, setCurrentJob] = useState(null);
@@ -29,6 +38,7 @@ function App() {
   const [ragDetails, setRagDetails] = useState([]);
   const [projectContextData, setProjectContextData] = useState({});
   const [performanceMetrics, setPerformanceMetrics] = useState(null);
+  const [analysisError, setAnalysisError] = useState(null);
   const [analysisOptions, setAnalysisOptions] = useState({
   context_model: "ollama",
   analyzer_model: "ollama",
@@ -60,21 +70,21 @@ function App() {
 
     const onAnalysisStarted = (data) => {
       console.log("Analysis started event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setJobStatus("analyzing");
       }
     };
 
     const onAgentActive = (data) => {
       console.log("Agent active event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setActiveAgent(data.agent);
       }
     };
 
     const onAgentComplete = (data) => {
       console.log("Agent complete event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         const agent = data.agent;
 
         // Add to completed agents list
@@ -104,45 +114,45 @@ function App() {
 
     const onAnalysisComplete = async (data) => {
       console.log("Analysis complete event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setJobStatus("completed");
         setActiveAgent(null);
 
         // Fetch full results
         try {
-          const results = await fetchContractResults(data.job_id);
-          setAnalysisResults(results.data.results);
+          const completed = validateCompletedResponse((await fetchContractResults(data.job_id)).data);
+          setAnalysisResults(completed.results);
           
           // Set performance metrics if available
-          if (data.performance_metrics) {
-            setPerformanceMetrics(data.performance_metrics);
-          } else if (results.data.performance_metrics) {
-            setPerformanceMetrics(results.data.performance_metrics);
-          }
+          setPerformanceMetrics(asObject(data.performance_metrics) || completed.performanceMetrics);
+          setAnalysisError(null);
         } catch (error) {
           console.error("Error fetching results:", error);
+          setJobStatus("error");
+          setAnalysisError(error.message || "The analysis completed but its results could not be loaded.");
         }
       }
     };
 
     const onAnalysisError = (data) => {
       console.log("Analysis error event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setJobStatus("error");
         setActiveAgent(null);
+        setAnalysisError(data?.error || "Analysis failed on the server.");
       }
     };
 
     const onContractFetched = (data) => {
       console.log("Contract fetched event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setJobStatus("fetched");
       }
     };
 
     const onAgentStatus = (data) => {
       console.log("Agent status event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setAgentDetails((prev) => ({
           ...prev,
           [data.agent]: {
@@ -156,22 +166,23 @@ function App() {
 
     const onRagDetails = (data) => {
       console.log("RAG details event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setRagDetails(data.details || []);
       }
     };
     
     const onProjectContextInsights = (data) => {
       console.log("Project context insights event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setProjectContextData(data.details || {});
       }
     };
 
     const onContractFetchError = (data) => {
       console.log("Contract fetch error event:", data);
-      if (currentJobRef.current?.id === data.job_id) {
+      if (currentJobRef.current?.id === data?.job_id) {
         setJobStatus("error");
+        setAnalysisError(data?.error || "The contract could not be fetched.");
       }
     };
 
@@ -214,17 +225,25 @@ function App() {
       interval = setInterval(async () => {
         try {
           const response = await fetchContractStatus(currentJob.id);
-          setJobStatus(response.data.status);
+          const status = response.data?.status;
+          if (!status) throw new Error("The server returned an invalid job status response.");
+          setJobStatus(status);
 
-          if (response.data.status === "completed") {
-            const results = await fetchContractResults(currentJob.id);
-            setAnalysisResults(results.data.results);
+          if (status === "completed") {
+            const completed = validateCompletedResponse((await fetchContractResults(currentJob.id)).data);
+            setAnalysisResults(completed.results);
+            setPerformanceMetrics(completed.performanceMetrics);
+            setAnalysisError(null);
             clearInterval(interval);
-          } else if (response.data.status === "error") {
+          } else if (status === "error") {
+            setAnalysisError(response.data?.error || "Analysis failed on the server.");
             clearInterval(interval);
           }
         } catch (error) {
           console.error("Error polling job status:", error);
+          setJobStatus("error");
+          setAnalysisError(error.message || "Unable to retrieve the analysis status.");
+          clearInterval(interval);
         }
       }, 5000);
     }
@@ -235,6 +254,10 @@ function App() {
   }, [currentJob, jobStatus]);
 
   const handleContractSubmit = (jobData) => {
+    if (!jobData?.id || !jobData?.status) {
+      setAnalysisError("The upload response did not include a valid analysis job.");
+      return;
+    }
     setCurrentJob(jobData);
     setJobStatus(jobData.status);
     setAnalysisResults(null);
@@ -244,10 +267,14 @@ function App() {
     setRagDetails([]); // Reset RAG details
     setProjectContextData({}); // Reset project context data
     setPerformanceMetrics(null); // Reset performance metrics
+    setAnalysisError(null);
   };
 
   const handleStartAnalysis = async () => {
-    if (!currentJob) return;
+    if (!currentJob?.id) {
+      setAnalysisError("Upload a contract before starting analysis.");
+      return;
+    }
 
     try {
       await startAnalysis({
@@ -255,8 +282,11 @@ function App() {
         ...analysisOptions,
       });
       setJobStatus("analyzing");
+      setAnalysisError(null);
     } catch (error) {
       console.error("Error starting analysis:", error);
+      setJobStatus("error");
+      setAnalysisError(error.response?.data?.error || error.message || "Unable to start analysis.");
     }
   };
 
@@ -303,6 +333,13 @@ function App() {
                       />
                     </div>
                   )}
+                  {analysisError && (
+                    <section className="mb-8 bg-red-50 border border-red-200 text-red-800 rounded-lg p-4" role="alert">
+                      <p className="font-medium">Analysis error</p>
+                      <p className="text-sm mt-1">{analysisError}</p>
+                      {currentJob && <button className="mt-3 px-3 py-2 rounded bg-red-700 text-white" onClick={handleStartAnalysis}>Retry analysis</button>}
+                    </section>
+                  )}
 
                   {/* Show Project Context Panel as soon as data is available */}
                   {Object.keys(projectContextData).length > 0 && (
@@ -313,16 +350,16 @@ function App() {
                   
                   {analysisResults && (
                     <div className="grid grid-cols-1 gap-6">
-                      <VulnerabilitiesPanel
-                        vulnerabilities={
-                          analysisResults.rechecked_vulnerabilities || []
-                        }
-                      />
-                      <ExploitsPanel
-                        exploits={analysisResults.generated_pocs || []}
-                      />
+                      <ErrorBoundary message="Vulnerability findings could not be rendered.">
+                        <VulnerabilitiesPanel vulnerabilities={Array.isArray(analysisResults.rechecked_vulnerabilities) ? analysisResults.rechecked_vulnerabilities : []} />
+                      </ErrorBoundary>
+                      <ErrorBoundary message="Proof-of-concept details could not be rendered.">
+                        <ExploitsPanel exploits={Array.isArray(analysisResults.generated_pocs) ? analysisResults.generated_pocs : []} />
+                      </ErrorBoundary>
                       {performanceMetrics && (
-                        <PerformanceMetricsPanel metrics={performanceMetrics} />
+                        <ErrorBoundary message="Performance metrics could not be rendered.">
+                          <PerformanceMetricsPanel metrics={performanceMetrics} />
+                        </ErrorBoundary>
                       )}
                     </div>
                   )}

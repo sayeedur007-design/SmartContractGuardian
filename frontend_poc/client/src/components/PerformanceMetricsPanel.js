@@ -1,269 +1,47 @@
-import React, { useState } from 'react';
+import React, { useState } from "react";
+
+const asObject = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+const asArray = (value) => Array.isArray(value) ? value : [];
+const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+const formatNumber = (value) => number(value).toLocaleString();
+const formatDecimal = (value) => number(value).toFixed(2);
+const formatTime = (value) => {
+  const seconds = number(value);
+  if (seconds < 1) return `${Math.round(seconds * 1000)} ms`;
+  if (seconds < 60) return `${seconds.toFixed(2)} sec`;
+  return `${Math.floor(seconds / 60)} min ${(seconds % 60).toFixed(1)} sec`;
+};
+
+function UsageTable({ entries, label }) {
+  const rows = Object.entries(asObject(entries));
+  if (!rows.length) return <p className="text-sm text-gray-500">No {label.toLowerCase()} usage was recorded.</p>;
+  return <div className="overflow-x-auto"><table className="min-w-full table-auto text-sm"><thead><tr className="bg-gray-100"><th className="px-4 py-2 text-left">{label}</th><th className="px-4 py-2 text-right">Prompt</th><th className="px-4 py-2 text-right">Completion</th><th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-right">Calls</th></tr></thead><tbody>{rows.map(([name, usage]) => {
+    const item = asObject(usage);
+    return <tr key={name} className="border-b"><td className="px-4 py-2 font-medium">{name}</td><td className="px-4 py-2 text-right">{formatNumber(item.prompt_tokens)}</td><td className="px-4 py-2 text-right">{formatNumber(item.completion_tokens)}</td><td className="px-4 py-2 text-right">{formatNumber(item.total_tokens)}</td><td className="px-4 py-2 text-right">{formatNumber(item.call_count)}</td></tr>;
+  })}</tbody></table></div>;
+}
 
 function PerformanceMetricsPanel({ metrics }) {
-  const [activeTab, setActiveTab] = useState('token');
+  const [activeTab, setActiveTab] = useState("token");
+  const data = asObject(metrics);
+  const tokenUsage = asObject(data.token_usage);
+  const totals = asObject(tokenUsage.total);
+  const timeMetrics = asObject(data.time_metrics);
+  const stageTimes = asObject(timeMetrics.stage_times);
+  const codeMetrics = asObject(data.code_metrics);
+  const derived = asObject(data.derived_metrics);
+  const runInfo = asObject(data.run_info);
+  const config = asObject(runInfo.config);
+  const totalSeconds = number(timeMetrics.total_seconds);
 
-  if (!metrics) {
-    return (
-      <div className="bg-white shadow-md rounded-lg p-4 mb-4">
-        <h2 className="text-xl font-semibold text-gray-800 mb-4">Performance Metrics</h2>
-        <p className="text-gray-600">No performance data available yet.</p>
-      </div>
-    );
-  }
+  if (!Object.keys(data).length) return <section className="bg-white shadow-md rounded-lg p-4"><h2 className="text-xl font-semibold">Performance Metrics</h2><p className="mt-2 text-gray-600">No performance data is available for this analysis.</p></section>;
 
-  // Format time (seconds) to a readable format with units
-  const formatTime = (seconds) => {
-    if (seconds < 1) {
-      return `${Math.round(seconds * 1000)} ms`;
-    } else if (seconds < 60) {
-      return `${seconds.toFixed(2)} sec`;
-    } else {
-      const minutes = Math.floor(seconds / 60);
-      const remainingSeconds = (seconds % 60).toFixed(1);
-      return `${minutes} min ${remainingSeconds} sec`;
-    }
-  };
-
-  // Format tokens to have commas for thousands
-  const formatNumber = (num) => {
-    return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  };
-
-  const renderTokenUsage = () => {
-    if (!metrics.token_usage) return <p>No token data available</p>;
-
-    return (
-      <div>
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Token Usage Summary</h3>
-        <div className="mb-4">
-          <p className="text-gray-600">
-            <span className="font-medium">Total Tokens:</span> {formatNumber(metrics.token_usage.total.total_tokens)}
-          </p>
-          <p className="text-gray-600">
-            <span className="font-medium">Prompt Tokens:</span> {formatNumber(metrics.token_usage.total.prompt_tokens)}
-          </p>
-          <p className="text-gray-600">
-            <span className="font-medium">Completion Tokens:</span> {formatNumber(metrics.token_usage.total.completion_tokens)}
-          </p>
-          <p className="text-gray-600">
-            <span className="font-medium">Total API Calls:</span> {metrics.token_usage.total.call_count}
-          </p>
-        </div>
-
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Token Usage by Agent</h3>
-        <div className="overflow-x-auto">
-          <table className="min-w-full table-auto text-sm">
-            <thead>
-              <tr className="bg-gray-100">
-                <th className="px-4 py-2 text-left">Agent</th>
-                <th className="px-4 py-2 text-right">Prompt</th>
-                <th className="px-4 py-2 text-right">Completion</th>
-                <th className="px-4 py-2 text-right">Total</th>
-                <th className="px-4 py-2 text-right">Calls</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(metrics.token_usage.by_agent).map(([agent, data]) => (
-                <tr key={agent} className="border-b">
-                  <td className="px-4 py-2 font-medium">{agent}</td>
-                  <td className="px-4 py-2 text-right">{formatNumber(data.prompt_tokens)}</td>
-                  <td className="px-4 py-2 text-right">{formatNumber(data.completion_tokens)}</td>
-                  <td className="px-4 py-2 text-right">{formatNumber(data.total_tokens)}</td>
-                  <td className="px-4 py-2 text-right">{data.call_count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <h3 className="text-lg font-semibold text-gray-700 mt-4 mb-2">Token Usage by Model</h3>
-        <div className="overflow-x-auto">
-          <table className="min-w-full table-auto text-sm">
-            <thead>
-              <tr className="bg-gray-100">
-                <th className="px-4 py-2 text-left">Model</th>
-                <th className="px-4 py-2 text-right">Prompt</th>
-                <th className="px-4 py-2 text-right">Completion</th>
-                <th className="px-4 py-2 text-right">Total</th>
-                <th className="px-4 py-2 text-right">Calls</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(metrics.token_usage.by_model).map(([model, data]) => (
-                <tr key={model} className="border-b">
-                  <td className="px-4 py-2 font-medium">{model}</td>
-                  <td className="px-4 py-2 text-right">{formatNumber(data.prompt_tokens)}</td>
-                  <td className="px-4 py-2 text-right">{formatNumber(data.completion_tokens)}</td>
-                  <td className="px-4 py-2 text-right">{formatNumber(data.total_tokens)}</td>
-                  <td className="px-4 py-2 text-right">{data.call_count}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  };
-
-  const renderTimeMetrics = () => {
-    if (!metrics.time_metrics) return <p>No time data available</p>;
-
-    return (
-      <div>
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Time Metrics</h3>
-        <p className="text-gray-600 mb-4">
-          <span className="font-medium">Total Analysis Time:</span> {formatTime(metrics.time_metrics.total_seconds)}
-        </p>
-
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Time by Stage</h3>
-        <div className="overflow-x-auto">
-          <table className="min-w-full table-auto text-sm">
-            <thead>
-              <tr className="bg-gray-100">
-                <th className="px-4 py-2 text-left">Stage</th>
-                <th className="px-4 py-2 text-right">Time</th>
-                <th className="px-4 py-2 text-right">% of Total</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(metrics.time_metrics.stage_times)
-                .sort((a, b) => b[1] - a[1]) // Sort by time in descending order
-                .map(([stage, time]) => (
-                  <tr key={stage} className="border-b">
-                    <td className="px-4 py-2 font-medium">{stage}</td>
-                    <td className="px-4 py-2 text-right">{formatTime(time)}</td>
-                    <td className="px-4 py-2 text-right">
-                      {((time / metrics.time_metrics.total_seconds) * 100).toFixed(1)}%
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  };
-
-  const renderCodeMetrics = () => {
-    if (!metrics.code_metrics) return <p>No code metrics available</p>;
-
-    return (
-      <div>
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Code Analysis</h3>
-        <div className="mb-4">
-          <p className="text-gray-600">
-            <span className="font-medium">Lines of Code:</span> {formatNumber(metrics.code_metrics.total_lines)}
-          </p>
-          <p className="text-gray-600">
-            <span className="font-medium">Files Analyzed:</span> {metrics.code_metrics.file_count}
-          </p>
-        </div>
-
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Analyzed Files</h3>
-        <div className="max-h-60 overflow-y-auto bg-gray-50 p-2 rounded text-gray-600 text-sm">
-          {metrics.code_metrics.files.map((file, idx) => (
-            <div key={idx} className="mb-1">
-              {file}
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  };
-
-  const renderDerivedMetrics = () => {
-    if (!metrics.derived_metrics) return <p>No derived metrics available</p>;
-
-    return (
-      <div>
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Summary Metrics</h3>
-        <div className="mb-4">
-          <p className="text-gray-600">
-            <span className="font-medium">Tokens per Second:</span> {metrics.derived_metrics.tokens_per_second.toFixed(2)}
-          </p>
-          <p className="text-gray-600">
-            <span className="font-medium">Tokens per Line of Code:</span> {metrics.derived_metrics.tokens_per_loc.toFixed(2)}
-          </p>
-        </div>
-
-        <h3 className="text-lg font-semibold text-gray-700 mb-2">Configuration</h3>
-        <div className="overflow-x-auto text-sm text-gray-600 bg-gray-50 p-3 rounded">
-          {metrics.run_info.config && (
-            <div>
-              <div className="mb-1">
-                <span className="font-medium">Analyzer Model:</span> {metrics.run_info.config.analyzer_model}
-              </div>
-              <div className="mb-1">
-                <span className="font-medium">Skeptic Model:</span> {metrics.run_info.config.skeptic_model}
-              </div>
-              <div className="mb-1">
-                <span className="font-medium">Exploiter Model:</span> {metrics.run_info.config.exploiter_model}
-              </div>
-              <div className="mb-1">
-                <span className="font-medium">Generator Model:</span> {metrics.run_info.config.generator_model}
-              </div>
-              <div className="mb-1">
-                <span className="font-medium">Context Model:</span> {metrics.run_info.config.context_model}
-              </div>
-              <div className="mb-1">
-                <span className="font-medium">Use RAG:</span> {metrics.run_info.config.use_rag ? 'Yes' : 'No'}
-              </div>
-              <div className="mb-1">
-                <span className="font-medium">Skip PoC:</span> {metrics.run_info.config.skip_poc ? 'Yes' : 'No'}
-              </div>
-              <div className="mb-1">
-                <span className="font-medium">Auto Run:</span> {metrics.run_info.config.auto_run ? 'Yes' : 'No'}
-              </div>
-              <div className="mb-1">
-                <span className="font-medium">Timestamp:</span> {metrics.run_info.timestamp}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div className="bg-white shadow-md rounded-lg p-4 mb-4">
-      <h2 className="text-xl font-semibold text-gray-800 mb-4">Performance Metrics</h2>
-      
-      <div className="flex border-b mb-4">
-        <button
-          className={`px-4 py-2 font-medium ${activeTab === 'token' ? 'text-blue-600 border-b-2 border-blue-500' : 'text-gray-600'}`}
-          onClick={() => setActiveTab('token')}
-        >
-          Token Usage
-        </button>
-        <button
-          className={`px-4 py-2 font-medium ${activeTab === 'time' ? 'text-blue-600 border-b-2 border-blue-500' : 'text-gray-600'}`}
-          onClick={() => setActiveTab('time')}
-        >
-          Time Analysis
-        </button>
-        <button
-          className={`px-4 py-2 font-medium ${activeTab === 'code' ? 'text-blue-600 border-b-2 border-blue-500' : 'text-gray-600'}`}
-          onClick={() => setActiveTab('code')}
-        >
-          Code Data
-        </button>
-        <button
-          className={`px-4 py-2 font-medium ${activeTab === 'summary' ? 'text-blue-600 border-b-2 border-blue-500' : 'text-gray-600'}`}
-          onClick={() => setActiveTab('summary')}
-        >
-          Summary
-        </button>
-      </div>
-
-      <div className="p-2">
-        {activeTab === 'token' && renderTokenUsage()}
-        {activeTab === 'time' && renderTimeMetrics()}
-        {activeTab === 'code' && renderCodeMetrics()}
-        {activeTab === 'summary' && renderDerivedMetrics()}
-      </div>
-    </div>
-  );
+  const tokenContent = <div><h3 className="text-lg font-semibold text-gray-700 mb-2">Token Usage Summary</h3><div className="mb-4 text-gray-600"><p><span className="font-medium">Total Tokens:</span> {formatNumber(totals.total_tokens)}</p><p><span className="font-medium">Prompt Tokens:</span> {formatNumber(totals.prompt_tokens)}</p><p><span className="font-medium">Completion Tokens:</span> {formatNumber(totals.completion_tokens)}</p><p><span className="font-medium">Total API Calls:</span> {formatNumber(totals.call_count)}</p></div><h3 className="text-lg font-semibold text-gray-700 mb-2">Token Usage by Agent</h3><UsageTable entries={tokenUsage.by_agent} label="Agent" /><h3 className="text-lg font-semibold text-gray-700 mt-4 mb-2">Token Usage by Model</h3><UsageTable entries={tokenUsage.by_model} label="Model" /></div>;
+  const timeContent = <div><h3 className="text-lg font-semibold text-gray-700 mb-2">Time Metrics</h3><p className="text-gray-600 mb-4"><span className="font-medium">Total Analysis Time:</span> {formatTime(totalSeconds)}</p><h3 className="text-lg font-semibold text-gray-700 mb-2">Time by Stage</h3>{Object.keys(stageTimes).length ? <div className="overflow-x-auto"><table className="min-w-full table-auto text-sm"><thead><tr className="bg-gray-100"><th className="px-4 py-2 text-left">Stage</th><th className="px-4 py-2 text-right">Time</th><th className="px-4 py-2 text-right">% of Total</th></tr></thead><tbody>{Object.entries(stageTimes).sort((a, b) => number(b[1]) - number(a[1])).map(([stage, value]) => <tr key={stage} className="border-b"><td className="px-4 py-2 font-medium">{stage}</td><td className="px-4 py-2 text-right">{formatTime(value)}</td><td className="px-4 py-2 text-right">{totalSeconds ? `${((number(value) / totalSeconds) * 100).toFixed(1)}%` : "N/A"}</td></tr>)}</tbody></table></div> : <p className="text-sm text-gray-500">No stage timing data was recorded.</p>}</div>;
+  const codeContent = <div><h3 className="text-lg font-semibold text-gray-700 mb-2">Code Analysis</h3><div className="mb-4 text-gray-600"><p><span className="font-medium">Lines of Code:</span> {formatNumber(codeMetrics.total_lines)}</p><p><span className="font-medium">Files Analyzed:</span> {formatNumber(codeMetrics.file_count)}</p></div><h3 className="text-lg font-semibold text-gray-700 mb-2">Analyzed Files</h3>{asArray(codeMetrics.files).length ? <div className="max-h-60 overflow-y-auto bg-gray-50 p-2 rounded text-gray-600 text-sm">{asArray(codeMetrics.files).map((file, index) => <div key={`${file}-${index}`} className="mb-1">{String(file)}</div>)}</div> : <p className="text-sm text-gray-500">No file list was recorded.</p>}</div>;
+  const summaryContent = <div><h3 className="text-lg font-semibold text-gray-700 mb-2">Summary Metrics</h3><div className="mb-4 text-gray-600"><p><span className="font-medium">Tokens per Second:</span> {formatDecimal(derived.tokens_per_second)}</p><p><span className="font-medium">Tokens per Line of Code:</span> {formatDecimal(derived.tokens_per_loc)}</p></div><h3 className="text-lg font-semibold text-gray-700 mb-2">Configuration</h3>{Object.keys(config).length ? <div className="text-sm text-gray-600 bg-gray-50 p-3 rounded">{["analyzer_model", "skeptic_model", "exploiter_model", "generator_model", "context_model"].map((key) => config[key] !== undefined && <div key={key} className="mb-1"><span className="font-medium">{key.replace("_", " ")}:</span> {String(config[key])}</div>)}<div className="mb-1"><span className="font-medium">Use RAG:</span> {config.use_rag ? "Yes" : "No"}</div><div><span className="font-medium">Timestamp:</span> {runInfo.timestamp || "Not recorded"}</div></div> : <p className="text-sm text-gray-500">Run configuration was not included in this response.</p>}</div>;
+  const content = { token: tokenContent, time: timeContent, code: codeContent, summary: summaryContent };
+  return <section className="bg-white shadow-md rounded-lg p-4 mb-4"><h2 className="text-xl font-semibold text-gray-800 mb-4">Performance Metrics</h2><div className="flex flex-wrap border-b mb-4">{[["token", "Token Usage"], ["time", "Time Analysis"], ["code", "Code Data"], ["summary", "Summary"]].map(([key, title]) => <button key={key} className={`px-4 py-2 font-medium ${activeTab === key ? "text-blue-600 border-b-2 border-blue-500" : "text-gray-600"}`} onClick={() => setActiveTab(key)}>{title}</button>)}</div><div className="p-2">{content[activeTab]}</div></section>;
 }
 
 export default PerformanceMetricsPanel;

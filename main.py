@@ -290,6 +290,13 @@ def main():
     performance_tracker.start_stage("results_reporting")
     print_header("Analysis Results")
     rechecked = results.get("rechecked_vulnerabilities", [])
+    print_step(f"Final report findings: {len(rechecked)}")
+    for finding in rechecked:
+        print_step(
+            f"Final finding: {finding.get('vulnerability_type')} | "
+            f"confidence={finding.get('skeptic_confidence', finding.get('confidence_score', 0))} | "
+            f"functions={finding.get('affected_functions', [])}"
+        )
 
     if not rechecked:
         print_warning("No vulnerabilities found")

@@ -14,16 +14,16 @@ const ContractInput = ({ onContractSubmit }) => {
 
   const handleDragOver = (e) => {
     e.preventDefault();
-    dragAreaRef.current.classList.add("border-blue-500");
+    dragAreaRef.current?.classList.add("border-blue-500");
   };
 
   const handleDragLeave = () => {
-    dragAreaRef.current.classList.remove("border-blue-500");
+    dragAreaRef.current?.classList.remove("border-blue-500");
   };
 
   const handleDrop = (e) => {
     e.preventDefault();
-    dragAreaRef.current.classList.remove("border-blue-500");
+    dragAreaRef.current?.classList.remove("border-blue-500");
 
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       handleFileUpload(e.dataTransfer.files[0]);
@@ -51,13 +51,16 @@ const ContractInput = ({ onContractSubmit }) => {
       formData.append("file", file);
 
       const response = await uploadContract(formData);
+      if (!response.data?.job_id || !response.data?.status) {
+        throw new Error("The server returned an invalid upload response");
+      }
       onContractSubmit({
         id: response.data.job_id,
         name: file.name,
         status: response.data.status,
       });
     } catch (error) {
-      setUploadError(error.response?.data?.error || "Error uploading contract");
+      setUploadError(error.response?.data?.error || error.message || "Error uploading contract");
     } finally {
       setIsUploading(false);
     }
@@ -83,6 +86,9 @@ const ContractInput = ({ onContractSubmit }) => {
       });
 
       console.log("Contract fetch response:", response.data);
+      if (!response.data?.job_id || !response.data?.status) {
+        throw new Error("The server returned an invalid contract response");
+      }
 
       onContractSubmit({
         id: response.data.job_id,
@@ -91,7 +97,7 @@ const ContractInput = ({ onContractSubmit }) => {
       });
     } catch (error) {
       console.error("Error fetching contract:", error);
-      setFetchError(error.response?.data?.error || "Error fetching contract");
+      setFetchError(error.response?.data?.error || error.message || "Error fetching contract");
     } finally {
       setIsFetching(false);
     }
@@ -107,7 +113,7 @@ const ContractInput = ({ onContractSubmit }) => {
         <div
           ref={dragAreaRef}
           className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center cursor-pointer transition-colors duration-200"
-          onClick={() => fileInputRef.current.click()}
+          onClick={() => fileInputRef.current?.click()}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}

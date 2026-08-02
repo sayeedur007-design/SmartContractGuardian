@@ -139,7 +139,7 @@ def build_chroma_vectorstore_from_json(
 
     try:
         embeddings = OllamaEmbeddings(
-            model="nomic-embed-text"
+            model="nomic-embed-text",
             base_url="http://127.0.0.1:11434"
         )
 

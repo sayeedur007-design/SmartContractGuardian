@@ -520,7 +520,9 @@ def get_status(job_id):
 
     return jsonify({
         'job_id': job_id,
-        'status': jobs[job_id]['status']
+        'status': jobs[job_id]['status'],
+        # The UI needs the failure reason to render an actionable error state.
+        'error': jobs[job_id].get('error')
     })
 
 @app.route('/api/results/<job_id>', methods=['GET'])

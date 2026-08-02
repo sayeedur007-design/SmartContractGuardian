@@ -64,6 +64,15 @@ class AgentCoordinator:
         from rich.console import Console
         console = Console()
 
+        def log_findings(stage: str, findings: list) -> None:
+            console.print(f"[bold]{stage}: {len(findings)} finding(s)[/bold]")
+            for finding in findings:
+                confidence = finding.get("skeptic_confidence", finding.get("confidence_score", 0))
+                console.print(
+                    f"  - {finding.get('vulnerability_type')} | confidence={confidence} | "
+                    f"functions={finding.get('affected_functions', [])}"
+                )
+
         # Set default auto-run config if none provided
         if auto_run_config is None:
             auto_run_config = {"auto_run": True, "max_retries": 3}
@@ -115,6 +124,7 @@ class AgentCoordinator:
             return {"status": "no_vulnerability_found"}
 
         console.print(f"[bold green]✓ AnalyzerAgent: Found {len(vulnerabilities)} potential vulnerabilities[/bold green]")
+        log_findings("Analyzer findings", vulnerabilities)
         for i, v in enumerate(vulnerabilities):
             console.print(f"  - {v.get('vulnerability_type')} (confidence: {v.get('confidence_score', 0):.2f})")
 
@@ -124,6 +134,8 @@ class AgentCoordinator:
         rechecked_vulns = self.skeptic.audit_vulnerabilities(
             contract_info["source_code"], vulnerabilities, contract_info.get("function_details", [])
         )
+
+        log_findings("Skeptic findings", rechecked_vulns)
 
         console.print("[bold green]✓ SkepticAgent: Completed verification[/bold green]")
         for i, v in enumerate(rechecked_vulns):
@@ -208,6 +220,7 @@ class AgentCoordinator:
 
         # End the last stage
         performance_tracker.end_stage()
+        log_findings("Merged/final findings", rechecked_vulns)
         console.print("\n[bold green]✓ Agent workflow completed[/bold green]")
         
         # Avoid printing token stats here - we'll do it in main.py as part of the comprehensive performance summary

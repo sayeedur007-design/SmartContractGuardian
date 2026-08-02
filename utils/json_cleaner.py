@@ -99,7 +99,7 @@ def clean_json_string(response_text: str) -> str:
 
     return response_text.strip()
 
-def parse_json_safely(response_text: str, default_fallback=None):
+def parse_json_safely(response_text: str, default_fallback=None, log_failure: bool = True):
     """
     Tries to clean and parse JSON, falling back to a default value if all attempts fail.
     """
@@ -107,7 +107,8 @@ def parse_json_safely(response_text: str, default_fallback=None):
     try:
         return json.loads(cleaned)
     except Exception as e:
-        logger.warning(f"Failed to parse cleaned JSON: {e}")
+        if log_failure:
+            logger.warning(f"Failed to parse cleaned JSON: {e}")
         # One last ditch effort: look for a JSON object in the cleaned text
         try:
             match = re.search(r"\{.*\}", cleaned, re.DOTALL)

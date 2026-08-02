@@ -391,7 +391,7 @@ Format findings as:
     def _parse_llm_response(self, response_text: str):
         from utils.json_cleaner import parse_json_safely
 
-        data = parse_json_safely(response_text, default_fallback={})
+        data = parse_json_safely(response_text, default_fallback={}, log_failure=False)
         if "vulnerabilities" in data:
             return data["vulnerabilities"]
 
@@ -400,7 +400,10 @@ Format findings as:
         # discarding the entire audit result.
         candidates = self._extract_vulnerability_objects(response_text)
         if candidates:
-            logger.warning("Recovered %d valid vulnerability finding(s) from malformed LLM JSON.", len(candidates))
+            # Recovery is an expected compatibility path for local models; the
+            # validated findings are retained and no parsing failure reaches a
+            # caller, so this must not be reported as a runtime warning.
+            logger.info("Recovered %d valid vulnerability finding(s) from malformed LLM JSON.", len(candidates))
             return candidates
 
         print("\n========== FAILED RESPONSE ==========")
@@ -441,7 +444,7 @@ Format findings as:
             elif char == "}" and depth:
                 depth -= 1
                 if depth == 0 and start is not None:
-                    item = parse_json_safely(response_text[start:index + 1], default_fallback=None)
+                    item = parse_json_safely(response_text[start:index + 1], default_fallback=None, log_failure=False)
                     if isinstance(item, dict) and item.get("vulnerability_type"):
                         objects.append(item)
             elif char == "]" and depth == 0:
@@ -456,20 +459,39 @@ Format findings as:
         """
         # Create a map of function names to their code content
         fn_map = {}
+        print("\n========== FUNCTION MAP ==========")
+        for fn in contract_info.get("function_details", []):
+            print(
+                fn.get("function"),
+                "|",
+                fn.get("function_id"),
+                "| content:",
+                fn.get("content") is not None
+            )
+        print("=================================\n")
         for fn_detail in contract_info.get("function_details", []):
             function_name = fn_detail["function"]
+            function_id = fn_detail.get("function_id", function_name)
             content = fn_detail.get("content")
-            if content:  # Only add if content is not None or empty
-                fn_map[function_name] = content
-            # Handle fully qualified function names with contract prefixes
-            qualified_name = f"{fn_detail['contract']}.{function_name}"
-            if content:
-                fn_map[qualified_name] = content
 
-        # Extract code for affected functions
+            if not content:
+                continue
+
+            fn_map[function_name] = content
+            fn_map[function_id] = content
+
+            fn_map[f"{fn_detail['contract']}.{function_name}"] = content
+            fn_map[f"{fn_detail['contract']}.{function_id}"] = content
+
+        # Extract code for affected function
         for vuln in vulnerabilities:
             snippet_list = []
             affected_fns = vuln.get("affected_functions", [])
+            print("\n========== VULNERABILITY ==========")
+            print(vuln.get("vulnerability_type"))
+            print("Affected:", affected_fns)
+            print("Available keys:", list(fn_map.keys())[:20])
+            print("==================================\n")
 
             # First try direct matches from function map
             for fn_name in affected_fns:
@@ -486,6 +508,7 @@ Format findings as:
                     for fn_name in affected_fns:
                         # Extract function name without contract prefix
                         simple_fn_name = fn_name.split('.')[-1] if '.' in fn_name else fn_name
+                        simple_fn_name = simple_fn_name.split('(')[0]
 
                         # Find in source code directly - basic approach
                         lines = source_code.split('\n')
