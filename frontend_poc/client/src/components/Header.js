@@ -18,7 +18,7 @@ const Header = () => {
               </li>
               <li>
                 <a
-                  href="https://github.com/yourusername/smart-contract-analyzer"
+                  href="https://github.com/sayeedur007-design/SmartContractGuardian"
                   target="_blank"
                   rel="noreferrer"
                   className="hover:text-blue-200"
