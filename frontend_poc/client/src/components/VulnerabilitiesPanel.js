@@ -43,7 +43,7 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
             </h3>
           </div>
           <div className="divide-y max-h-96 overflow-y-auto">
-            {items.map((vuln, index) => (
+            {Array.isArray(items) && items.map((vuln, index) => (
               <div
                 key={index}
                 className={`px-4 py-3 cursor-pointer hover:bg-gray-50 ${selectedVulnIndex === index ? "bg-blue-50" : ""}`}
@@ -120,7 +120,7 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
                   {Array.isArray(selectedVuln.affected_functions) &&
                   selectedVuln.affected_functions.length > 0 ? (
                     <ul className="list-disc pl-5 text-sm text-gray-600 mt-1">
-                      {selectedVuln.affected_functions.map((func, idx) => (
+                      {Array.isArray(selectedVuln.affected_functions) && selectedVuln.affected_functions.map((func, idx) => (
                         <li key={idx}>{func}</li>
                       ))}
                     </ul>

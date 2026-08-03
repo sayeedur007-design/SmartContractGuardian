@@ -1,18 +1,39 @@
 import React, { useState } from "react";
 
+const asArray = (value) => (Array.isArray(value) ? value : []);
+const normalizeCategories = (value) =>
+  Array.isArray(value) ? value : value ? [value] : [];
+const displayCategory = (category) => {
+  if (typeof category === "string" || typeof category === "number") {
+    return String(category);
+  }
+
+  try {
+    return JSON.stringify(category) || "Unknown category";
+  } catch {
+    return "Unknown category";
+  }
+};
+
 // Component to show RAG details
 const RAGDetailsPanel = ({ details = [] }) => {
   const [expandedItem, setExpandedItem] = useState(null);
+  const items = Array.isArray(details)
+    ? details.filter((item) => item && typeof item === "object")
+    : [];
   
-  if (!details || details.length === 0) return null;
+  if (items.length === 0) return null;
   
   return (
     <div className="mt-4 p-4 bg-indigo-50 border border-indigo-200 rounded-md">
       <h3 className="text-lg font-semibold text-indigo-800 mb-3">
-        Retrieved Similar Vulnerabilities ({details.length})
+        Retrieved Similar Vulnerabilities ({items.length})
       </h3>
       <div className="space-y-3">
-        {details.map((item, index) => (
+        {Array.isArray(items) && items.map((item, index) => {
+          const categories = normalizeCategories(item.vuln_categories);
+
+          return (
           <div key={index} className="bg-white border border-indigo-100 rounded-md overflow-hidden">
             <div 
               className="flex items-center justify-between p-3 cursor-pointer bg-indigo-50 hover:bg-indigo-100"
@@ -28,11 +49,15 @@ const RAGDetailsPanel = ({ details = [] }) => {
               </div>
               <div className="flex items-center">
                 <div className="flex space-x-1 mr-2">
-                  {item.vuln_categories.map((cat, i) => (
-                    <span key={i} className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">
-                      {cat}
-                    </span>
-                  ))}
+                  {categories.length > 0 ? (
+                    Array.isArray(categories) && categories.map((cat, i) => (
+                      <span key={i} className="px-2 py-1 bg-red-100 text-red-800 text-xs rounded">
+                        {displayCategory(cat)}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-xs text-gray-500">No vulnerability categories</span>
+                  )}
                 </div>
                 <svg 
                   className={`w-5 h-5 text-indigo-500 transform transition-transform ${expandedItem === index ? 'rotate-180' : ''}`} 
@@ -52,13 +77,17 @@ const RAGDetailsPanel = ({ details = [] }) => {
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
 };
 
 const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetails = {}, ragDetails = [] }) => {
+  const completedAgentList = asArray(completedAgents);
+  const ragDetailList = asArray(ragDetails);
+  const safeAgentDetails = agentDetails && typeof agentDetails === "object" ? agentDetails : {};
   // Define all steps in the workflow
   const workflowSteps = [
     {
@@ -110,7 +139,7 @@ const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetai
 
   // Helper to determine if a step is completed
   const isStepCompleted = (stepId) => {
-    return status === "completed" || completedAgents.includes(stepId);
+    return status === "completed" || completedAgentList.includes(stepId);
   };
 
   // Helper to determine the current step index
@@ -127,11 +156,13 @@ const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetai
     }
 
     // If no active agent but there are completed agents, return the index after the last completed one
-    if (completedAgents.length > 0) {
+    if (completedAgentList.length > 0) {
       // Find the maximum index of any completed agent
-      const completedIndices = completedAgents
-        .map((agent) => workflowSteps.findIndex((step) => step.id === agent))
-        .filter((index) => index >= 0);
+      const completedIndices = Array.isArray(completedAgentList)
+        ? completedAgentList
+            .map((agent) => workflowSteps.findIndex((step) => step.id === agent))
+            .filter((index) => index >= 0)
+        : [];
 
       if (completedIndices.length > 0) {
         return Math.max(...completedIndices) + 1;
@@ -182,7 +213,7 @@ const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetai
 
         {/* Step list */}
         <div className="space-y-4">
-          {workflowSteps.map((step, index) => {
+          {Array.isArray(workflowSteps) && workflowSteps.map((step, index) => {
             // Determine step status
             let stepStatus = "pending";
             if (isStepCompleted(step.id)) {
@@ -259,16 +290,16 @@ const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetai
                 <div className="w-full">
                   <div className={`font-medium ${textColor}`}>{step.label}</div>
                   <div className="text-sm text-gray-500">
-                    {agentDetails[step.id]?.detail || step.description}
+                    {safeAgentDetails[step.id]?.detail || step.description}
                   </div>
-                  {agentDetails[step.id]?.status && stepStatus === "active" && (
+                  {safeAgentDetails[step.id]?.status && stepStatus === "active" && (
                     <div className="mt-1 text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded">
-                      {agentDetails[step.id].status}
+                      {safeAgentDetails[step.id].status}
                     </div>
                   )}
-                  {agentDetails[step.id]?.result && stepStatus === "completed" && (
+                  {safeAgentDetails[step.id]?.result && stepStatus === "completed" && (
                     <div className="mt-1 text-xs bg-green-50 text-green-700 px-2 py-1 rounded">
-                      {agentDetails[step.id].result}
+                      {safeAgentDetails[step.id].result}
                     </div>
                   )}
                 </div>
@@ -304,7 +335,7 @@ const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetai
             <div>
               <span className="font-medium text-blue-700">Current activity:</span>{" "}
               <span className="text-blue-600">
-                {agentDetails[activeAgent]?.status || 
+                {safeAgentDetails[activeAgent]?.status ||
                   (activeAgent === "static_analyzer"
                     ? "Running static analysis"
                     : activeAgent === "analyzer"
@@ -323,17 +354,17 @@ const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetai
           </div>
           
           {/* Detailed status */}
-          {agentDetails[activeAgent]?.detail && (
+          {safeAgentDetails[activeAgent]?.detail && (
             <div className="ml-8 text-sm text-blue-600 border-l-2 border-blue-200 pl-3">
-              {agentDetails[activeAgent].detail}
+              {safeAgentDetails[activeAgent].detail}
             </div>
           )}
         </div>
       )}
       
       {/* Display RAG details if available and the analyzer agent is active or complete */}
-      {ragDetails.length > 0 && (activeAgent === "analyzer" || completedAgents.includes("analyzer")) && (
-        <RAGDetailsPanel details={ragDetails} />
+      {ragDetailList.length > 0 && (activeAgent === "analyzer" || completedAgentList.includes("analyzer")) && (
+        <RAGDetailsPanel details={ragDetailList} />
       )}
 
       {/* Success indicator */}
@@ -361,7 +392,7 @@ const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetai
         <div className="mt-4 p-2 bg-gray-100 text-xs font-mono">
           <div>Active Agent: {activeAgent || "none"}</div>
           <div>Status: {status}</div>
-          <div>Completed Agents: {completedAgents.join(", ") || "none"}</div>
+          <div>Completed Agents: {completedAgentList.join(", ") || "none"}</div>
           <div>Current Step Index: {currentStepIndex}</div>
         </div>
       )}

@@ -1,6 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import mermaid from 'mermaid';
 
+const asArray = (value) => (Array.isArray(value) ? value : []);
+const asObject = (value) =>
+  value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+
 const ProjectContextPanel = ({ contextData }) => {
   const [activeTab, setActiveTab] = useState('insights');
   const mermaidRef = useRef(null);
@@ -27,7 +31,9 @@ const ProjectContextPanel = ({ contextData }) => {
   }, [activeTab, contextData]);
   
   // If no data, show placeholder
-  if (!contextData || Object.keys(contextData).length === 0) {
+  const safeContextData = asObject(contextData);
+
+  if (Object.keys(safeContextData).length === 0) {
     return (
       <div className="bg-white p-6 rounded-lg shadow-md">
         <h2 className="text-xl font-semibold mb-4">Project Context Analysis</h2>
@@ -40,26 +46,34 @@ const ProjectContextPanel = ({ contextData }) => {
   
   // Extract data from context
   const { 
-    insights = [], 
-    dependencies = [], 
-    vulnerabilities = [], 
-    recommendations = [], 
-    important_functions = [],
-    contract_files = [],
-    contract_details = [],
+    insights: rawInsights,
+    dependencies: rawDependencies,
+    vulnerabilities: rawVulnerabilities,
+    recommendations: rawRecommendations,
+    important_functions: rawImportantFunctions,
+    contract_files: rawContractFiles,
+    contract_details: rawContractDetails,
     mermaid_diagram = '',
-    stats = {}
-  } = contextData;
+    stats: rawStats
+  } = safeContextData;
+  const insights = asArray(rawInsights);
+  const dependencies = asArray(rawDependencies);
+  const vulnerabilities = asArray(rawVulnerabilities);
+  const recommendations = asArray(rawRecommendations);
+  const important_functions = asArray(rawImportantFunctions);
+  const contract_files = asArray(rawContractFiles);
+  const contract_details = asArray(rawContractDetails);
+  const stats = asObject(rawStats);
   
   // Function to render list items with tailwind styling
   const renderList = (items, icon) => {
-    if (!items || items.length === 0) {
+    if (!Array.isArray(items) || items.length === 0) {
       return <div className="text-gray-500 italic p-3">No items found</div>;
     }
     
     return (
       <ul className="divide-y">
-        {items.map((item, index) => (
+        {Array.isArray(items) && items.map((item, index) => (
           <li key={index} className="py-3 px-2 hover:bg-blue-50">
             <div className="flex items-start">
               <div className="flex-shrink-0 text-blue-500 mr-2">
@@ -78,7 +92,7 @@ const ProjectContextPanel = ({ contextData }) => {
   // Get or generate mermaid diagram definition
   const generateMermaidDiagram = () => {
     // If we have an LLM-generated diagram, use it
-    if (mermaid_diagram && mermaid_diagram.trim().length > 0) {
+    if (typeof mermaid_diagram === 'string' && mermaid_diagram.trim().length > 0) {
       return mermaid_diagram;
     }
     
@@ -90,15 +104,17 @@ const ProjectContextPanel = ({ contextData }) => {
     
     // Extract contract names directly from the contract_details
     const contractNames = [];
-    if (contract_details && contract_details.length > 0) {
-      contract_details.forEach(contract => {
-        const name = contract.name;
+    if (Array.isArray(contract_details) && contract_details.length > 0) {
+      Array.isArray(contract_details) && contract_details.forEach(contract => {
+        const name = contract && typeof contract === 'object' ? contract.name : null;
+        if (!name) return;
         contracts.add(name);
         contractNames.push(name);
       });
     } else {
       // Fallback to extracting from file paths if no contract details
-      contract_files.forEach(file => {
+      Array.isArray(contract_files) && contract_files.forEach(file => {
+        if (typeof file !== 'string') return;
         const name = file.split('/').pop().replace('.sol', '');
         contracts.add(name);
         contractNames.push(name);
@@ -106,12 +122,13 @@ const ProjectContextPanel = ({ contextData }) => {
     }
     
     // Add all contracts as nodes
-    contractNames.forEach(contract => {
+    Array.isArray(contractNames) && contractNames.forEach(contract => {
       diagram += `${contract}["${contract}"];\n`;
     });
     
     // Parse dependencies to add relationships
-    dependencies.forEach(dep => {
+    Array.isArray(dependencies) && dependencies.forEach(dep => {
+      if (typeof dep !== 'string') return;
       // Look for relationships mentioned in the dependency text
       const usesRegex = /(\w+)\s+(?:uses|imports|inherits from|extends|implements)\s+(\w+)/gi;
       const dependsRegex = /(\w+)\s+(?:depends on|interacts with|calls)\s+(\w+)/gi;
@@ -140,7 +157,7 @@ const ProjectContextPanel = ({ contextData }) => {
       const libraries = [];
       const mainContracts = [];
       
-      contractNames.forEach(name => {
+      Array.isArray(contractNames) && contractNames.forEach(name => {
         if (name.startsWith('I') && name.length > 1 && name[1].toUpperCase() === name[1]) {
           interfaces.push(name);
         } else if (name.includes('Library') || name.includes('Utils') || name.includes('Helper')) {
@@ -153,7 +170,7 @@ const ProjectContextPanel = ({ contextData }) => {
       // Add subgraphs for different types
       if (interfaces.length > 0) {
         diagram += 'subgraph Interfaces\n';
-        interfaces.forEach(name => {
+        Array.isArray(interfaces) && interfaces.forEach(name => {
           diagram += `${name}["${name}"];\n`;
         });
         diagram += 'end\n';
@@ -161,7 +178,7 @@ const ProjectContextPanel = ({ contextData }) => {
       
       if (libraries.length > 0) {
         diagram += 'subgraph Libraries\n';
-        libraries.forEach(name => {
+        Array.isArray(libraries) && libraries.forEach(name => {
           diagram += `${name}["${name}"];\n`;
         });
         diagram += 'end\n';
@@ -169,14 +186,14 @@ const ProjectContextPanel = ({ contextData }) => {
       
       if (mainContracts.length > 0) {
         diagram += 'subgraph Contracts\n';
-        mainContracts.forEach(name => {
+        Array.isArray(mainContracts) && mainContracts.forEach(name => {
           diagram += `${name}["${name}"];\n`;
         });
         diagram += 'end\n';
       }
       
       // Add some likely connections based on naming conventions
-      interfaces.forEach(iface => {
+      Array.isArray(interfaces) && interfaces.forEach(iface => {
         const implName = iface.substring(1); // Remove 'I' prefix
         if (mainContracts.includes(implName)) {
           diagram += `${implName}-->|implements|${iface};\n`;
@@ -184,8 +201,8 @@ const ProjectContextPanel = ({ contextData }) => {
       });
       
       // Connect libraries to contracts that might use them
-      libraries.forEach(lib => {
-        mainContracts.forEach(contract => {
+      Array.isArray(libraries) && libraries.forEach(lib => {
+        Array.isArray(mainContracts) && mainContracts.forEach(contract => {
           diagram += `${contract}-->|may use|${lib};\n`;
         });
       });
@@ -236,7 +253,7 @@ const ProjectContextPanel = ({ contextData }) => {
       {/* Tabs */}
       <div className="border-b border-gray-200 mb-4">
         <nav className="flex -mb-px space-x-6 overflow-x-auto pb-1">
-          {tabs.map(tab => (
+          {Array.isArray(tabs) && tabs.map(tab => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
@@ -282,7 +299,7 @@ const ProjectContextPanel = ({ contextData }) => {
         <div className="mt-5">
           <h3 className="text-sm font-medium text-gray-700 mb-2">Analyzed Contracts:</h3>
           <div className="flex flex-wrap gap-2">
-            {contract_files.map((file, index) => (
+            {Array.isArray(contract_files) && contract_files.map((file, index) => (
               <span key={index} className="text-xs bg-gray-100 text-gray-800 px-2 py-1 rounded">
                 {file}
               </span>

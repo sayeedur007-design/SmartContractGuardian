@@ -44,7 +44,9 @@ class ExploitRunner:
                 diagnostic = self._diagnose(output)
                 diagnostics.append(diagnostic)
                 if last_execution["success"]:
-                    return self._result(path, attempt, diagnostics, last_compile, last_execution)
+                    result = self._result(path, attempt, diagnostics, last_compile, last_execution)
+                    self._cleanup_job_workspace(path)
+                    return result
             else:
                 output = last_compile["output"]
                 diagnostic = self._diagnose(output)
@@ -66,7 +68,9 @@ class ExploitRunner:
                 continue
             path.write_text(candidate, encoding="utf-8")
 
-        return self._result(path, self.max_retries, diagnostics, last_compile, last_execution)
+        result = self._result(path, self.max_retries, diagnostics, last_compile, last_execution)
+        self._cleanup_job_workspace(path)
+        return result
 
     def _execute_test(self, path: Path, attempt: int, code: str) -> Dict:
         execution_root = self.exploit_root / ".poc_execution" / uuid.uuid4().hex
@@ -92,7 +96,7 @@ class ExploitRunner:
                 command.extend(["--use", solc])
             result = subprocess.run(
                 command,
-                cwd=self.exploit_root,
+                cwd=execution_root,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -124,6 +128,21 @@ class ExploitRunner:
             "execution_trace": output,
             "failure_reason": "" if success else self._failure_reason(output, returncode),
         }
+
+    def _cleanup_job_workspace(self, path: Path) -> None:
+        """Delete only generated per-job PoCs after execution completes."""
+        workspace_root = (self.exploit_root / "tmp").resolve()
+        try:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(workspace_root):
+                return
+            job_dir = resolved.parent
+            if job_dir.parent != workspace_root:
+                return
+            shutil.rmtree(job_dir)
+            print(f"[Runner] Removed isolated Forge workspace: {job_dir}")
+        except OSError as exc:
+            print_warning(f"Unable to remove isolated Forge workspace for {path}: {exc}")
 
     def _result(self, path: Optional[Path] = None, retries: int = 0, diagnostics=None,
                 compile_result=None, execution_result=None, error: str = "") -> Dict:

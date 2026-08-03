@@ -11,7 +11,7 @@ from utils.print_utils import print_warning, create_progress_spinner
 from openai import OpenAI
 from langchain.schema import Document
 from .project_context_llm import ProjectContextLLMAgent
-from utils.function_identifiers import known_function_ids, normalize_affected_functions
+from utils.function_identifiers import known_function_ids
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,63 @@ class AnalyzerAgent:
         return findings
 
     @staticmethod
+    def _normalize_function_reference_for_lookup(value, allowed: set) -> str | None:
+        """Resolve an LLM function reference to a known canonical function ID.
+
+        LLMs occasionally append analysis-specific identifiers (for example,
+        ``withdraw(uint256)_0x6d9485e7``).  Those identifiers are not part of a
+        Solidity ABI signature, so they must be removed before matching.  This
+        method is deliberately lookup-only: callers retain the original value
+        for logs and report output.
+
+        Bare names and ``()`` are resolved only when the target has a single
+        overload with that name.  This prevents a generated suffix from
+        accidentally selecting the wrong overloaded function.
+        """
+        if not isinstance(value, str):
+            return None
+
+        candidate = value.strip()
+        if not candidate:
+            return None
+
+        # Contract qualification is presentation metadata, not part of the
+        # ABI-style IDs stored in ``allowed``.
+        short_name = candidate.rsplit(".", 1)[-1].replace(" ", "")
+
+        # Strip trailing analysis/compiler artifacts, but only when they are
+        # separated from the function reference.  Supported artifacts include
+        # hex hashes, numeric temporary IDs, UUID-like hex IDs, and long
+        # generated hashes.  Repeating the substitution handles compound IDs.
+        artifact_suffix = re.compile(
+            r"(?:[_$#@:]+(?:0x[0-9a-f]+|[0-9]+|[0-9a-f]{8,}|[a-z0-9]{16,}|"
+            r"(?:tmp|temp|id|function|fn|compiler)[_-]?[a-z0-9]+))+$",
+            re.IGNORECASE,
+        )
+        normalized = artifact_suffix.sub("", short_name)
+
+        if normalized in allowed:
+            return normalized
+
+        name = normalized.split("(", 1)[0]
+        matches = [function_id for function_id in allowed if function_id.split("(", 1)[0] == name]
+        # Signature-less references (including ``withdraw()``) are only safe
+        # when the contract has a single overload with that name.
+        if len(matches) == 1 and ("(" not in normalized or normalized.endswith("()")):
+            return matches[0]
+        return None
+
+    @classmethod
+    def _normalize_affected_functions_for_lookup(cls, values, allowed: set) -> List[str]:
+        """Return unique canonical IDs for lookup without changing report labels."""
+        normalized = []
+        for value in values or []:
+            resolved = cls._normalize_function_reference_for_lookup(value, allowed)
+            if resolved and resolved not in normalized:
+                normalized.append(resolved)
+        return normalized
+
+    @staticmethod
     def _validate_findings(vulnerabilities: list, contract_info: Dict) -> list:
         """Drop hallucinations instead of allowing them into the skeptic stage."""
         allowed = known_function_ids(contract_info.get("function_details", []))
@@ -185,12 +242,15 @@ class AnalyzerAgent:
         for finding in vulnerabilities:
             if not isinstance(finding, dict) or not finding.get("vulnerability_type"):
                 continue
-            affected = normalize_affected_functions(finding.get("affected_functions", []), allowed)
+            affected = AnalyzerAgent._normalize_affected_functions_for_lookup(
+                finding.get("affected_functions", []), allowed
+            )
             # A source-level finding must identify an exact analyzed function.
             if not affected:
                 logger.warning("Dropping finding %r with unknown affected functions %r", finding.get("vulnerability_type"), finding.get("affected_functions"))
                 continue
-            finding["affected_functions"] = affected
+            # Keep the LLM's original function label for diagnostics and
+            # reporting. ``affected`` is intentionally used only for lookup.
             validated.append(finding)
         return validated
 
@@ -505,6 +565,7 @@ Format findings as:
             fn_map[f"{fn_detail['contract']}.{function_id}"] = content
 
         # Extract code for affected function
+        allowed_function_ids = known_function_ids(contract_info.get("function_details", []))
         for vuln in vulnerabilities:
             snippet_list = []
             affected_fns = vuln.get("affected_functions", [])
@@ -515,8 +576,10 @@ Format findings as:
             print("==================================\n")
 
             # First try direct matches from function map
-            for fn_name in affected_fns:
-                if code_snip := fn_map.get(fn_name):
+            for function_id in self._normalize_affected_functions_for_lookup(
+                affected_fns, allowed_function_ids
+            ):
+                if code_snip := fn_map.get(function_id):
                     snippet_list.append(code_snip)
 
             # Set the code snippet
@@ -526,10 +589,10 @@ Format findings as:
                 # Try to search for relevant code from source code directly if no matches are found
                 source_code = contract_info.get("source_code", "")
                 if source_code and affected_fns:
-                    for fn_name in affected_fns:
-                        # Extract function name without contract prefix
-                        simple_fn_name = fn_name.split('.')[-1] if '.' in fn_name else fn_name
-                        simple_fn_name = simple_fn_name.split('(')[0]
+                    for function_id in self._normalize_affected_functions_for_lookup(
+                        affected_fns, allowed_function_ids
+                    ):
+                        simple_fn_name = function_id.split('(', 1)[0]
 
                         # Find in source code directly - basic approach
                         lines = source_code.split('\n')
