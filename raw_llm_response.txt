@@ -1,3 +1,12 @@
+```json
 {
-  "vulnerabilities": []
+  "vulnerabilities": [{
+      "vulnerability_type": "UNCHECKED_LOW_LEVEL_CALLS",
+      "confidence_score": 1.0,
+      "reasoning": "The function 'play' contains a low-level call to the 'whale' contract without checking its return value.",
+      "affected_functions": ["0xe09b1ab8111c2729a76f16de96bc86a7af837928"],
+      "impact": "If the 'donate' function of the 'whale' contract fails, it can lead to a denial of service for the 'play' function and potentially cause the contract to lose funds.",
+      "exploitation_scenario": "An attacker can initiate a 'play' transaction that calls the low-level 'donate' function on the 'whale' contract. If due to some reason (e.g., the whale contract has insufficient balance or fails for any other reason), the call to 'donate' fails, reverting the entire 'play' transaction."
+  }]
 }
+```
