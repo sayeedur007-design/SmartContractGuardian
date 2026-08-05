@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import Header from "./components/Header";
+import VulnerabilitiesPage from "./components/VulnerabilitiesPage";
+import SecureGeneratorPage from "./components/SecureGeneratorPage";
 import ContractInput from "./components/ContractInput";
 import AgentVisualizer from "./components/AgentVisualizer";
 import VulnerabilitiesPanel from "./components/VulnerabilitiesPanel";
@@ -362,6 +364,8 @@ function App() {
                 </>
               }
             />
+            <Route path="/vulnerabilities" element={<VulnerabilitiesPage />} />
+            <Route path="/secure-generator" element={<SecureGeneratorPage />} />
           </Routes>
         </main>
       </div>

@@ -79,11 +79,8 @@ ctfbench_evaluation.log
 # ===========================
 # Reports
 # ===========================
-reports/*.json
-reports/*.md
-performance_metrics_*.json
-token_usage_stats.json
-
+reports/*
+!reports/.gitkeep
 # ===========================
 # Miscellaneous
 # ===========================
