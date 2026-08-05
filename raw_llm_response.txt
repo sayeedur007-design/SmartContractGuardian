@@ -1,12 +1,22 @@
 ```json
 {
-  "vulnerabilities": [{
+  "vulnerabilities": [
+    {
+      "vulnerability_type": "REENTRANCY",
+      "confidence_score": 0.9,
+      "reasoning": "The contract uses a low-level external call (msg.sender.call{value: amount}()) followed by state changes (balances[msg.sender] -= amount). This pattern can lead to a reentrancy attack where the same caller could initiate another 'withdraw' call inside the first one, potentially emptying the contract's balance.",
+      "affected_functions": ["0x4e1d2b7a"],
+      "impact": "The attacker would be able to drain the contract's funds indefinitely.",
+      "exploitation_scenario": "1. An attacker sends a transaction with sufficient ETH to the contract. 2. The contract calls `msg.sender.call{value: amount}()`. 3. The fallback (receive) function is triggered inside `withdraw`, allowing the attacker to initiate another 'withdraw' call within it. This cycle repeats until the contract's balance is emptied."
+    },
+    {
       "vulnerability_type": "UNCHECKED_LOW_LEVEL_CALLS",
-      "confidence_score": 1.0,
-      "reasoning": "The function 'play' contains a low-level call to the 'whale' contract without checking its return value.",
-      "affected_functions": ["0xe09b1ab8111c2729a76f16de96bc86a7af837928"],
-      "impact": "If the 'donate' function of the 'whale' contract fails, it can lead to a denial of service for the 'play' function and potentially cause the contract to lose funds.",
-      "exploitation_scenario": "An attacker can initiate a 'play' transaction that calls the low-level 'donate' function on the 'whale' contract. If due to some reason (e.g., the whale contract has insufficient balance or fails for any other reason), the call to 'donate' fails, reverting the entire 'play' transaction."
-  }]
+      "confidence_score": 0.9,
+      "reasoning": "The contract uses a low-level external call (msg.sender.call{value: amount}()) without checking if the call was successful.",
+      "affected_functions": ["0x4e1d2b7a"],
+      "impact": "While less severe than reentrancy, an unsuccessful call could cause unexpected behavior, possibly leading to the loss of funds or other unintended consequences.",
+      "exploitation_scenario": "1. An attacker sends a transaction with insufficient ETH such that `msg.sender.call{value: amount}()` fails. 2. The contract continues to execute by attempting to reduce `balances[msg.sender]` after this failed call, eventually leading to potential errors in the state."
+    }
+  ]
 }
 ```

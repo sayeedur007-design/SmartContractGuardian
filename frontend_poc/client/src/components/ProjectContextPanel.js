@@ -1,49 +1,60 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import mermaid from 'mermaid';
 
 const asArray = (value) => (Array.isArray(value) ? value : []);
 const asObject = (value) =>
   value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 
+const relationshipPattern = /^(\w+)\s+(?:inherits from|imports|uses|implements|extends|depends on|interacts with|calls)\s+(\w+)/i;
+
+const buildFallbackDiagram = (contractDetails, contractFiles, dependencies) => {
+  const details = contractDetails.length
+    ? contractDetails
+    : contractFiles.map((file) => ({ name: String(file).split(/[\\/]/).pop().replace(/\.sol$/i, '') }));
+  const names = [...new Set(details.map((detail) => detail?.name).filter(Boolean))];
+  const ids = new Map(names.map((name, index) => [name, `contract_${index}`]));
+  const lines = ['graph TD'];
+
+  names.forEach((name) => lines.push(`${ids.get(name)}["${String(name).replace(/"/g, "'")}"]`));
+  dependencies.forEach((dependency) => {
+    if (typeof dependency !== 'string') return;
+    const match = dependency.match(relationshipPattern);
+    if (match && ids.has(match[1])) {
+      if (!ids.has(match[2])) {
+        const targetId = `contract_${ids.size}`;
+        ids.set(match[2], targetId);
+        lines.push(`${targetId}["${String(match[2]).replace(/"/g, "'")}"]`);
+      }
+      lines.push(`${ids.get(match[1])} --> ${ids.get(match[2])}`);
+    }
+  });
+  // Mermaid requires at least one node.  This also gives a clear, non-crashing
+  // result when an incomplete context payload reaches the diagram tab.
+  if (names.length === 0) lines.push('empty["No contract relationships found"]');
+  return lines.join('\n');
+};
+
 const ProjectContextPanel = ({ contextData }) => {
   const [activeTab, setActiveTab] = useState('insights');
   const mermaidRef = useRef(null);
-  
-  // Initialize mermaid
+  const renderId = useRef(`project-context-diagram-${Math.random().toString(36).slice(2)}`);
+  const [diagramError, setDiagramError] = useState('');
+
   useEffect(() => {
     mermaid.initialize({
-      startOnLoad: true,
+      startOnLoad: false,
       theme: 'default',
-      securityLevel: 'loose',
+      securityLevel: 'strict',
       flowchart: {
-        htmlLabels: true,
+        htmlLabels: false,
         curve: 'basis'
       }
     });
-    
-    if (activeTab === 'diagram' && mermaidRef.current) {
-      try {
-        mermaid.contentLoaded();
-      } catch (error) {
-        console.error('Mermaid rendering error:', error);
-      }
-    }
-  }, [activeTab, contextData]);
+  }, []);
   
   // If no data, show placeholder
   const safeContextData = asObject(contextData);
 
-  if (Object.keys(safeContextData).length === 0) {
-    return (
-      <div className="bg-white p-6 rounded-lg shadow-md">
-        <h2 className="text-xl font-semibold mb-4">Project Context Analysis</h2>
-        <div className="p-4 text-center text-gray-500">
-          No contract relationship data available
-        </div>
-      </div>
-    );
-  }
-  
   // Extract data from context
   const { 
     insights: rawInsights,
@@ -89,127 +100,63 @@ const ProjectContextPanel = ({ contextData }) => {
     );
   };
   
-  // Get or generate mermaid diagram definition
-  const generateMermaidDiagram = () => {
-    // If we have an LLM-generated diagram, use it
-    if (typeof mermaid_diagram === 'string' && mermaid_diagram.trim().length > 0) {
-      return mermaid_diagram;
-    }
-    
-    // Otherwise, generate a fallback diagram
-    let diagram = 'graph TD;\n';
-    
-    // Track contracts we've seen
-    const contracts = new Set();
-    
-    // Extract contract names directly from the contract_details
-    const contractNames = [];
-    if (Array.isArray(contract_details) && contract_details.length > 0) {
-      Array.isArray(contract_details) && contract_details.forEach(contract => {
-        const name = contract && typeof contract === 'object' ? contract.name : null;
-        if (!name) return;
-        contracts.add(name);
-        contractNames.push(name);
-      });
-    } else {
-      // Fallback to extracting from file paths if no contract details
-      Array.isArray(contract_files) && contract_files.forEach(file => {
-        if (typeof file !== 'string') return;
-        const name = file.split('/').pop().replace('.sol', '');
-        contracts.add(name);
-        contractNames.push(name);
-      });
-    }
-    
-    // Add all contracts as nodes
-    Array.isArray(contractNames) && contractNames.forEach(contract => {
-      diagram += `${contract}["${contract}"];\n`;
+  const fallbackDefinition = useMemo(
+    () => buildFallbackDiagram(contract_details, contract_files, dependencies),
+    [contract_details, contract_files, dependencies]
+  );
+  const diagramDefinition = typeof mermaid_diagram === 'string' && mermaid_diagram.trim()
+    ? mermaid_diagram.trim()
+    : fallbackDefinition;
+
+  useEffect(() => {
+    if (activeTab !== 'diagram' || !mermaidRef.current || !diagramDefinition) return undefined;
+    let cancelled = false;
+    setDiagramError('');
+    mermaidRef.current.innerHTML = '';
+
+    const renderDiagram = async (definition, suffix) => {
+      const { svg, bindFunctions } = await mermaid.render(`${renderId.current}-${suffix}`, definition);
+      if (cancelled || !mermaidRef.current) return;
+      mermaidRef.current.innerHTML = svg;
+      bindFunctions?.(mermaidRef.current);
+    };
+
+    (async () => {
+      try {
+        await renderDiagram(diagramDefinition, 'primary');
+      } catch (primaryError) {
+        // LLM output is optional and may be syntactically invalid.  The source
+        // derived graph is deterministic and covers inheritance/import edges.
+        console.error('Contract diagram rendering failed.', { primaryError, diagramDefinition });
+        if (diagramDefinition === fallbackDefinition) throw primaryError;
+        try {
+          await renderDiagram(fallbackDefinition, 'fallback');
+          console.warn('Rendered source-derived contract diagram after Mermaid rejected LLM output.', {
+            contract_details,
+            dependencies,
+            generatedMermaid: fallbackDefinition,
+          });
+        } catch (fallbackError) {
+          console.error('Source-derived contract diagram rendering also failed.', { fallbackError, fallbackDefinition });
+          throw fallbackError;
+        }
+      }
+    })().catch(() => {
+      if (!cancelled) setDiagramError('Unable to render the contract diagram. Please review the project relationships and try again.');
     });
-    
-    // Parse dependencies to add relationships
-    Array.isArray(dependencies) && dependencies.forEach(dep => {
-      if (typeof dep !== 'string') return;
-      // Look for relationships mentioned in the dependency text
-      const usesRegex = /(\w+)\s+(?:uses|imports|inherits from|extends|implements)\s+(\w+)/gi;
-      const dependsRegex = /(\w+)\s+(?:depends on|interacts with|calls)\s+(\w+)/gi;
-      
-      let match;
-      while ((match = usesRegex.exec(dep)) !== null) {
-        const [, from, to] = match;
-        if (contractNames.includes(from) || contractNames.includes(to)) {
-          diagram += `${from}-->${to};\n`;
-        }
-      }
-      
-      while ((match = dependsRegex.exec(dep)) !== null) {
-        const [, from, to] = match;
-        if (contractNames.includes(from) || contractNames.includes(to)) {
-          diagram += `${from}-->${to};\n`;
-        }
-      }
-    });
-    
-    // If we couldn't extract any relationships, create a simpler diagram
-    if (!diagram.includes('-->')) {
-      diagram = 'graph TD;\n';
-      // Group contracts by type (interface, library, contract)
-      const interfaces = [];
-      const libraries = [];
-      const mainContracts = [];
-      
-      Array.isArray(contractNames) && contractNames.forEach(name => {
-        if (name.startsWith('I') && name.length > 1 && name[1].toUpperCase() === name[1]) {
-          interfaces.push(name);
-        } else if (name.includes('Library') || name.includes('Utils') || name.includes('Helper')) {
-          libraries.push(name);
-        } else {
-          mainContracts.push(name);
-        }
-      });
-      
-      // Add subgraphs for different types
-      if (interfaces.length > 0) {
-        diagram += 'subgraph Interfaces\n';
-        Array.isArray(interfaces) && interfaces.forEach(name => {
-          diagram += `${name}["${name}"];\n`;
-        });
-        diagram += 'end\n';
-      }
-      
-      if (libraries.length > 0) {
-        diagram += 'subgraph Libraries\n';
-        Array.isArray(libraries) && libraries.forEach(name => {
-          diagram += `${name}["${name}"];\n`;
-        });
-        diagram += 'end\n';
-      }
-      
-      if (mainContracts.length > 0) {
-        diagram += 'subgraph Contracts\n';
-        Array.isArray(mainContracts) && mainContracts.forEach(name => {
-          diagram += `${name}["${name}"];\n`;
-        });
-        diagram += 'end\n';
-      }
-      
-      // Add some likely connections based on naming conventions
-      Array.isArray(interfaces) && interfaces.forEach(iface => {
-        const implName = iface.substring(1); // Remove 'I' prefix
-        if (mainContracts.includes(implName)) {
-          diagram += `${implName}-->|implements|${iface};\n`;
-        }
-      });
-      
-      // Connect libraries to contracts that might use them
-      Array.isArray(libraries) && libraries.forEach(lib => {
-        Array.isArray(mainContracts) && mainContracts.forEach(contract => {
-          diagram += `${contract}-->|may use|${lib};\n`;
-        });
-      });
-    }
-    
-    return diagram;
-  };
+    return () => { cancelled = true; };
+  }, [activeTab, diagramDefinition, fallbackDefinition, contract_details, dependencies]);
+
+  if (Object.keys(safeContextData).length === 0) {
+    return (
+      <div className="bg-white p-6 rounded-lg shadow-md">
+        <h2 className="text-xl font-semibold mb-4">Project Context Analysis</h2>
+        <div className="p-4 text-center text-gray-500">
+          No contract relationship data available
+        </div>
+      </div>
+    );
+  }
   
   // Tab configuration
   const tabs = [
@@ -281,11 +228,9 @@ const ProjectContextPanel = ({ contextData }) => {
         {activeTab === 'functions' && renderList(important_functions, '🔑')}
         {activeTab === 'diagram' && (
           <div className="h-full p-3">
-            {contract_files.length > 0 ? (
+            {contract_files.length > 0 || contract_details.length > 0 || mermaid_diagram ? (
               <div className="mermaid-container h-full overflow-auto">
-                <div ref={mermaidRef} className="mermaid">
-                  {generateMermaidDiagram()}
-                </div>
+                {diagramError ? <div className="text-red-700 p-3" role="alert">{diagramError}</div> : <div ref={mermaidRef} />}
               </div>
             ) : (
               <div className="text-gray-500 italic p-3">No contracts available for diagram</div>

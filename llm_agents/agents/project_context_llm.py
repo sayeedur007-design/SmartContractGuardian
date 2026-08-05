@@ -41,7 +41,8 @@ class ProjectContextLLMAgent:
             self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
             
         # Simple regex patterns for initial metadata extraction
-        self.contract_pattern = re.compile(r'(?:contract|interface|library)\s+(\w+)(?:\s+is\s+([^{]+))?\s*\{', re.MULTILINE)
+        self.contract_pattern = re.compile(r'\b(contract|interface|library)\s+(\w+)(?:\s+is\s+([^\{]+))?\s*\{', re.MULTILINE)
+        self.import_pattern = re.compile(r'\bimport\s+(?:[^;]*?\s+from\s+)?[\"\']([^\"\']+)[\"\']\s*;', re.MULTILINE)
         
         # Analysis status and tracking
         self.job_id = None
@@ -85,6 +86,8 @@ class ProjectContextLLMAgent:
         return context
     
     def _get_contract_files(self, contracts_dir: str) -> List[str]:
+        if os.path.isfile(contracts_dir):
+            return [contracts_dir] if contracts_dir.endswith('.sol') else []
         contract_files = []
         for root, _, files in os.walk(contracts_dir):
             for file in files:
@@ -99,13 +102,23 @@ class ProjectContextLLMAgent:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                 contract_names = []
+                contract_details = []
                 for match in self.contract_pattern.finditer(content):
-                    contract_names.append(match.group(1))
+                    contract_type, contract_name, inherited = match.groups()
+                    contract_names.append(contract_name)
+                    contract_details.append({
+                        'file': os.path.basename(file_path),
+                        'name': contract_name,
+                        'type': contract_type,
+                        'inherits': [base.strip().split(' ')[0] for base in (inherited or '').split(',') if base.strip()]
+                    })
                 summary_lines = content.split('\n')[:15]
                 summary = '\n'.join(summary_lines) + '\n...' if len(summary_lines) > 15 else content
                 metadata.append({
                     'file_path': file_path,
                     'contract_names': contract_names,
+                    'contract_details': contract_details,
+                    'imports': self.import_pattern.findall(content),
                     'summary': summary,
                     'size': len(content)
                 })
@@ -154,15 +167,16 @@ class ProjectContextLLMAgent:
             important_functions = insights.get('important_functions', [])
             mermaid_diagram = insights.get('mermaid_diagram', '')
             
+            contract_info, source_dependencies = self._build_project_structure(contract_metadata)
+            # The source-derived relationships are always available, even when the LLM
+            # returns malformed JSON or omits a relationship category.
+            dependencies = self._unique_strings(source_dependencies + dependencies)
             total_relationships = len(dependencies) + len(important_functions)
-            
-            contract_info = []
-            for meta in contract_metadata:
-                for contract_name in meta.get('contract_names', []):
-                    contract_info.append({
-                        'file': os.path.basename(meta.get('file_path', 'unknown')),
-                        'name': contract_name
-                    })
+            # LLM output can contain Mermaid-incompatible IDs (for example a
+            # styled subgraph title with spaces).  Always serialize the graph
+            # from parsed Solidity metadata so the frontend receives valid,
+            # stable node IDs while retaining all discovered relationships.
+            mermaid_diagram = self._generate_mermaid_diagram(contract_info, dependencies)
             
             result = {
                 'llm_analysis': response,
@@ -188,14 +202,77 @@ class ProjectContextLLMAgent:
             
         except Exception as e:
             logger.error(f"Error parsing LLM response: {str(e)}")
+            contract_info, source_dependencies = self._build_project_structure(contract_metadata)
             return {
                 'llm_analysis': response,
+                'insights': [],
+                'dependencies': source_dependencies,
+                'vulnerabilities': [],
+                'recommendations': [],
+                'important_functions': [],
+                'contract_files': [m.get('file_path', 'unknown') for m in contract_metadata],
+                'contract_details': contract_info,
+                'call_graph': call_graph,
+                'mermaid_diagram': self._generate_mermaid_diagram(contract_info, source_dependencies),
                 'stats': {
                     'total_contracts': len(contract_metadata),
-                    'total_relationships': 0,
-                    'has_inter_contract_calls': False
+                    'total_relationships': len(source_dependencies),
+                    'has_inter_contract_calls': bool(source_dependencies)
                 }
             }
+
+    @staticmethod
+    def _unique_strings(values: List[str]) -> List[str]:
+        seen = set()
+        return [value for value in values if isinstance(value, str) and value and not (value in seen or seen.add(value))]
+
+    def _build_project_structure(self, contract_metadata: List[Dict]) -> Tuple[List[Dict], List[str]]:
+        """Create a reliable graph source from Solidity declarations, inheritance and imports."""
+        details = [detail for meta in contract_metadata for detail in meta.get('contract_details', [])]
+        file_contracts = {
+            os.path.basename(meta.get('file_path', '')): meta.get('contract_names', [])
+            for meta in contract_metadata
+        }
+        dependencies = []
+        for detail in details:
+            for base in detail.get('inherits', []):
+                dependencies.append(f"{detail['name']} inherits from {base}")
+        for meta in contract_metadata:
+            imported_contracts = []
+            for imported_path in meta.get('imports', []):
+                imported_contracts.extend(file_contracts.get(
+                    os.path.basename(imported_path),
+                    [Path(imported_path).stem]
+                ))
+            for source in meta.get('contract_names', []):
+                for target in imported_contracts:
+                    dependencies.append(f"{source} imports {target}")
+        return details, self._unique_strings(dependencies)
+
+    def _generate_mermaid_diagram(self, contract_details: List[Dict], dependencies: List[str]) -> str:
+        """Generate valid Mermaid even for a single contract or a dependency-free project."""
+        lines = ['graph TD']
+        name_to_id = {}
+        for index, detail in enumerate(contract_details):
+            name = str(detail.get('name', '')).strip()
+            if not name:
+                continue
+            node_id = f"n{index}"
+            name_to_id[name] = node_id
+            label = name.replace('"', "'")
+            lines.append(f'{node_id}["{label}"]')
+        relationship = re.compile(r'^(\w+)\s+(?:inherits from|imports|uses|implements|extends|depends on|interacts with|calls)\s+(\w+)')
+        for dependency in dependencies:
+            match = relationship.match(dependency)
+            if not match or match.group(1) not in name_to_id:
+                continue
+            target = match.group(2)
+            if target not in name_to_id:
+                target_id = f"n{len(name_to_id)}"
+                name_to_id[target] = target_id
+                lines.append(f'{target_id}["{target.replace(chr(34), chr(39))}"]')
+            lines.append(f"{name_to_id[match.group(1)]} --> {name_to_id[target]}")
+        return '\n'.join(lines)
     
     def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
         # Import token tracker

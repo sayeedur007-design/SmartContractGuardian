@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import Header from "./components/Header";
 import ContractInput from "./components/ContractInput";
-import AnalysisOptions from "./components/AnalysisOptions";
 import AgentVisualizer from "./components/AgentVisualizer";
 import VulnerabilitiesPanel from "./components/VulnerabilitiesPanel";
 import ExploitsPanel from "./components/ExploitsPanel";
@@ -28,6 +27,8 @@ const validateCompletedResponse = (payload) => {
   return { results, performanceMetrics: asObject(response.performance_metrics) };
 };
 
+const getProjectContext = (results) => asObject(results?.project_context);
+
 function App() {
   const [currentJob, setCurrentJob] = useState(null);
   const [jobStatus, setJobStatus] = useState("idle");
@@ -39,7 +40,7 @@ function App() {
   const [projectContextData, setProjectContextData] = useState({});
   const [performanceMetrics, setPerformanceMetrics] = useState(null);
   const [analysisError, setAnalysisError] = useState(null);
-  const [analysisOptions, setAnalysisOptions] = useState({
+  const analysisOptions = {
   context_model: "ollama",
   analyzer_model: "ollama",
   skeptic_model: "ollama",
@@ -50,7 +51,7 @@ function App() {
   use_rag: true,
   skip_poc_generation: false,
   export_markdown: false,
-});
+  };
 
   // Keep a reference to currentJob that won't cause effect hook to re-run
   const currentJobRef = useRef(null);
@@ -122,6 +123,8 @@ function App() {
         try {
           const completed = validateCompletedResponse((await fetchContractResults(data.job_id)).data);
           setAnalysisResults(completed.results);
+          const completedContext = getProjectContext(completed.results);
+          if (completedContext) setProjectContextData(completedContext);
           
           // Set performance metrics if available
           setPerformanceMetrics(asObject(data.performance_metrics) || completed.performanceMetrics);
@@ -232,6 +235,8 @@ function App() {
           if (status === "completed") {
             const completed = validateCompletedResponse((await fetchContractResults(currentJob.id)).data);
             setAnalysisResults(completed.results);
+            const completedContext = getProjectContext(completed.results);
+            if (completedContext) setProjectContextData(completedContext);
             setPerformanceMetrics(completed.performanceMetrics);
             setAnalysisError(null);
             clearInterval(interval);
@@ -290,40 +295,31 @@ function App() {
     }
   };
 
-  const handleOptionsChange = (options) => {
-    setAnalysisOptions({
-      ...analysisOptions,
-      ...options,
-    });
-  };
-
   return (
     <Router>
-      <div className="min-h-screen bg-gray-100">
+      <div className="app-shell min-h-screen">
         <Header />
 
-        <main className="container mx-auto p-4 md:p-6 max-w-7xl">
+        <main className="container mx-auto px-4 md:px-6 max-w-7xl">
           <Routes>
             <Route
               path="/"
               element={
                 <>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-                    <ContractInput onContractSubmit={handleContractSubmit} />
-                    <AnalysisOptions
-                      options={analysisOptions}
-                      onChange={handleOptionsChange}
+                  <section className="landing-hero">
+                    <div className="hero-badge">✦&nbsp; AI-POWERED SECURITY ANALYSIS</div>
+                    <h1>Smart Contract Vulnerability <span>Analyzer</span></h1>
+                    <p>Advanced AI-powered security analysis for Solidity smart contracts</p>
+                    <ContractInput
+                      onContractSubmit={handleContractSubmit}
                       onStartAnalysis={handleStartAnalysis}
-                      isReady={
-                        currentJob &&
-                        ["uploaded", "fetched"].includes(jobStatus)
-                      }
+                      isReady={Boolean(currentJob && ["uploaded", "fetched"].includes(jobStatus))}
                       isAnalyzing={jobStatus === "analyzing"}
                     />
-                  </div>
+                  </section>
 
                   {currentJob && (
-                    <div className="mb-8">
+                    <div className="mb-8 analysis-workflow">
                       <AgentVisualizer
                         activeAgent={activeAgent}
                         status={jobStatus}

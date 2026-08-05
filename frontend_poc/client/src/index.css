@@ -1,17 +1,385 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: #020b18;
+  color: #dbeafe;
+  transition: background-color 160ms ease, color 160ms ease;
+}
+
+.app-shell {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 87% 18%, rgba(0, 121, 255, 0.12), transparent 25%),
+    radial-gradient(circle at 7% 72%, rgba(0, 84, 200, 0.13), transparent 27%),
+    linear-gradient(180deg, #020b18 0%, #031328 55%, #020a15 100%);
 }
 
 code {
   font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
     monospace;
 }
+
+.site-header {
+  position: relative;
+  z-index: 2;
+  border-bottom: 1px solid rgba(71, 138, 196, 0.3);
+  background: rgba(1, 11, 25, 0.83);
+  backdrop-filter: blur(18px);
+}
+
+.site-header-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 1.2rem 2.4rem;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border: 1px solid rgba(57, 136, 208, 0.36);
+  border-radius: 0.75rem;
+  background: rgba(2, 20, 43, 0.75);
+  font-size: 1.125rem;
+  line-height: 1;
+}
+
+.brand-link,
+.nav-link,
+.section-title,
+.model-label {
+  display: inline-flex;
+  align-items: center;
+}
+
+.brand-link {
+  gap: 12px;
+  color: #f7fbff;
+  font-family: 'Space Grotesk', Inter, sans-serif;
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+}
+
+.brand-logo {
+  height: 56px;
+  width: auto;
+  object-fit: contain;
+  border-radius: 0.5rem;
+  background: transparent;
+  padding: 0;
+}
+
+.nav-link {
+  gap: 0.4rem;
+  font-weight: 500;
+  padding: 0.8rem 1.1rem;
+  border: 1px solid rgba(58, 142, 216, 0.35);
+  border-radius: 0.75rem;
+  color: #f6fbff;
+  background: rgba(1, 18, 41, 0.58);
+}
+
+.nav-home {
+  border-color: #168fe8;
+  color: #f7fbff;
+  box-shadow: inset 0 0 16px rgba(0, 150, 255, 0.1);
+}
+
+@media (max-width: 640px) { .site-header-inner { padding: 0.85rem 1rem; }.brand-link { font-size: 1.15rem; gap: 0.45rem; }.brand-logo { height: 42px; }.nav-link { padding: 0.6rem; }.nav-link svg { margin: 0; }.nav-link:not(.nav-home) { font-size: 0; }.nav-home { font-size: 0; } }
+
+.section-title {
+  gap: 0.5rem;
+  color: #111827;
+}
+
+.model-label {
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #374151;
+}
+
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.65rem;
+  cursor: pointer;
+  color: #374151;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.toggle-row input,
+.peer {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.modern-switch {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 2.75rem;
+  height: 1.5rem;
+  border-radius: 9999px;
+  background: #cbd5e1;
+  transition: background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.modern-switch::after {
+  content: '';
+  position: absolute;
+  top: 0.1875rem;
+  left: 0.1875rem;
+  width: 1.125rem;
+  height: 1.125rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.25);
+  transition: transform 180ms ease;
+}
+
+.toggle-row input:checked + .modern-switch,
+input.peer:checked + .modern-switch {
+  background: #2563eb;
+}
+
+.toggle-row input:checked + .modern-switch::after,
+input.peer:checked + .modern-switch::after {
+  transform: translateX(1.25rem);
+}
+
+.toggle-row input:focus-visible + .modern-switch,
+input.peer:focus-visible + .modern-switch {
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.35);
+}
+
+.toggle-row input:disabled + .modern-switch {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+html.dark body,
+html.dark .bg-gray-100 {
+  background-color: #0b1120 !important;
+  color: #f8fafc;
+}
+
+html.dark header {
+  background: #0f172a !important;
+}
+
+html.dark .bg-white,
+html.dark .bg-gray-50,
+html.dark .bg-gray-100 {
+  background-color: #111827 !important;
+}
+
+html.dark .bg-blue-50,
+html.dark .bg-indigo-50,
+html.dark .bg-green-50,
+html.dark .bg-yellow-50,
+html.dark .bg-red-50,
+html.dark .bg-purple-50 {
+  background-color: #172033 !important;
+}
+
+html.dark .text-gray-800,
+html.dark .text-gray-700,
+html.dark .text-gray-600,
+html.dark .text-gray-500,
+html.dark .text-gray-400 {
+  color: #d1d5db !important;
+}
+
+html.dark h1,
+html.dark h2,
+html.dark h3,
+html.dark h4,
+html.dark .font-semibold,
+html.dark .font-medium {
+  color: #f8fafc;
+}
+
+html.dark .section-title,
+html.dark .model-label,
+html.dark .toggle-row {
+  color: #f8fafc;
+}
+
+html.dark .modern-switch {
+  background: #374151;
+}
+
+html.dark .border,
+html.dark .border-b,
+html.dark .border-t,
+html.dark .border-gray-100,
+html.dark .border-gray-200,
+html.dark .border-gray-300 {
+  border-color: #374151 !important;
+}
+
+html.dark input,
+html.dark select,
+html.dark textarea,
+html.dark .bg-gray-200 {
+  background-color: #0f172a !important;
+  color: #f8fafc !important;
+  border-color: #374151 !important;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #9ca3af;
+}
+
+html.dark button:not(.theme-toggle) {
+  border-color: #374151;
+}
+
+html.dark pre,
+html.dark code {
+  color: #e5e7eb;
+}
+
+/* Results-page visual reskin.  These selectors deliberately preserve the
+   existing component markup, order, state classes, and data flow. */
+.app-shell .bg-white {
+  background: #111c2e !important;
+  border-color: #29435c !important;
+  border-radius: 18px !important;
+  box-shadow: 0 14px 32px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(148, 163, 184, 0.035) !important;
+}
+
+.app-shell .bg-gray-50,
+.app-shell .bg-gray-100,
+.app-shell .bg-gray-200 {
+  background: #18263d !important;
+  border-color: #29435c !important;
+}
+
+.app-shell .border,
+.app-shell .border-b,
+.app-shell .border-t,
+.app-shell .border-l,
+.app-shell .divide-y > :not([hidden]) ~ :not([hidden]) {
+  border-color: #29435c !important;
+}
+
+.app-shell h2 {
+  color: #f8fafc !important;
+  font-family: "Space Grotesk", Inter, sans-serif;
+  font-size: 1.35rem;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+}
+
+.app-shell h3,
+.app-shell h4,
+.app-shell .font-semibold,
+.app-shell .font-medium { color: #f8fafc !important; }
+
+.app-shell .text-gray-800,
+.app-shell .text-gray-700 { color: #dce7f5 !important; }
+.app-shell .text-gray-600,
+.app-shell .text-gray-500,
+.app-shell .text-gray-400 { color: #94a3b8 !important; }
+
+.app-shell .hover\:bg-gray-50:hover,
+.app-shell .hover\:bg-blue-50:hover,
+.app-shell .hover\:bg-indigo-100:hover { background: #203550 !important; }
+
+.app-shell .bg-blue-50,
+.app-shell .bg-indigo-50,
+.app-shell .bg-purple-50 { background: rgba(30, 144, 255, 0.1) !important; }
+.app-shell .bg-green-50 { background: rgba(34, 197, 94, 0.1) !important; }
+.app-shell .bg-red-50 { background: rgba(239, 68, 68, 0.1) !important; }
+.app-shell .bg-yellow-50 { background: rgba(245, 158, 11, 0.1) !important; }
+
+.app-shell .border-blue-100,
+.app-shell .border-blue-200,
+.app-shell .border-blue-300,
+.app-shell .border-indigo-100,
+.app-shell .border-indigo-200 { border-color: rgba(30, 144, 255, 0.45) !important; }
+.app-shell .border-green-200,
+.app-shell .border-green-300 { border-color: rgba(34, 197, 94, 0.45) !important; }
+.app-shell .border-red-200,
+.app-shell .border-red-300 { border-color: rgba(239, 68, 68, 0.45) !important; }
+
+.app-shell .text-blue-500,
+.app-shell .text-blue-600,
+.app-shell .text-blue-700,
+.app-shell .text-indigo-500,
+.app-shell .text-indigo-600,
+.app-shell .text-indigo-700,
+.app-shell .text-indigo-800 { color: #00d4ff !important; }
+.app-shell .text-green-500,
+.app-shell .text-green-600,
+.app-shell .text-green-700,
+.app-shell .text-green-800 { color: #22c55e !important; }
+.app-shell .text-red-600,
+.app-shell .text-red-700,
+.app-shell .text-red-800 { color: #ff7784 !important; }
+.app-shell .text-yellow-800,
+.app-shell .text-amber-600 { color: #f59e0b !important; }
+
+/* Workflow states retain their existing classes, but receive the requested
+   subdued card treatment and status-colour left border. */
+.analysis-workflow .bg-gray-50.border-gray-200 {
+  background: #18263d !important;
+  border-left: 3px solid #64748b !important;
+}
+.analysis-workflow .bg-blue-50.border-blue-200 {
+  background: rgba(30, 144, 255, 0.13) !important;
+  border-left: 3px solid #1e90ff !important;
+  box-shadow: 0 5px 18px rgba(30, 144, 255, 0.1);
+}
+.analysis-workflow .bg-green-50.border-green-200 {
+  background: rgba(34, 197, 94, 0.1) !important;
+  border-left: 3px solid #22c55e !important;
+}
+.analysis-workflow .bg-gray-300 { background: #334155 !important; }
+.analysis-workflow .bg-blue-500 { background: #1e90ff !important; }
+.analysis-workflow .bg-green-500 { background: #22c55e !important; }
+.analysis-workflow .rounded-md { border-radius: 12px !important; }
+
+/* Existing pills, tabs, controls, and tables use the same dark system. */
+.app-shell [class*="rounded-full"] { border-radius: 999px !important; }
+.app-shell .bg-green-100 { background: rgba(34, 197, 94, 0.16) !important; }
+.app-shell .bg-red-100 { background: rgba(239, 68, 68, 0.16) !important; }
+.app-shell .bg-blue-100 { background: rgba(30, 144, 255, 0.16) !important; }
+.app-shell .bg-purple-100 { background: rgba(135, 92, 246, 0.16) !important; }
+.app-shell .border-blue-500,
+.app-shell .border-b-2.border-blue-500 { border-color: #00d4ff !important; }
+.app-shell button:not(.start-analysis-button):not(.theme-toggle) { transition: color 160ms ease, background-color 160ms ease, box-shadow 160ms ease; }
+
+.app-shell table { overflow: hidden; border: 1px solid #29435c; border-radius: 12px; color: #dce7f5; }
+.app-shell thead tr { background: #18263d !important; color: #f8fafc; }
+.app-shell tbody tr { border-color: #29435c !important; transition: background-color 160ms ease; }
+.app-shell tbody tr:hover { background: rgba(30, 144, 255, 0.09); }
+.app-shell pre { background: #0b1627 !important; border: 1px solid #29435c; color: #dce7f5 !important; }
+
+.app-shell .shadow-md,
+.app-shell .shadow-lg { box-shadow: 0 14px 32px rgba(0, 0, 0, 0.2) !important; }
+.app-shell .hover\:shadow-lg:hover,
+.app-shell .hover\:shadow-md:hover { transform: translateY(-2px); box-shadow: 0 18px 38px rgba(0, 0, 0, 0.28) !important; }

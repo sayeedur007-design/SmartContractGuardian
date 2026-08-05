@@ -1,34 +1,24 @@
 import React from "react";
-import { Link } from "react-router-dom";
+import { Link, NavLink } from "react-router-dom";
+import { FileText, GitFork, Home, Shield } from "lucide-react";
+import logo from "../assets/SmartGuardLogo.png";
 
 const Header = () => {
   return (
-    <header className="bg-gradient-to-r from-indigo-700 to-blue-600 text-white shadow-lg">
-      <div className="container mx-auto p-4">
-        <div className="flex justify-between items-center">
-          <Link to="/" className="text-2xl font-bold">
-            Smart Contract Vulnerability Analyzer
-          </Link>
-          <nav>
-            <ul className="flex space-x-4">
-              <li>
-                <Link to="/" className="hover:text-blue-200">
-                  Home
-                </Link>
-              </li>
-              <li>
-                <a
-                  href="https://github.com/sayeedur007-design/SmartContractGuardian"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="hover:text-blue-200"
-                >
-                  GitHub
-                </a>
-              </li>
-            </ul>
-          </nav>
-        </div>
+    <header className="site-header">
+      <div className="site-header-inner">
+        <Link to="/" className="brand-link">
+          <img src={logo} alt="SmartGuard AI logo" className="brand-logo" />
+          <span className="brand-copy"><span className="brand-name">SmartGuard <em>AI</em></span><small>Secure. Analyze. Protect.</small></span>
+        </Link>
+        <nav aria-label="Primary navigation">
+          <ul className="site-nav">
+            <li><NavLink to="/" end className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}><Home size={17} />Home</NavLink></li>
+            <li><NavLink to="/vulnerabilities" className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}><Shield size={17} />Vulnerabilities</NavLink></li>
+            <li><NavLink to="/secure-generator" className={({ isActive }) => `nav-link ${isActive ? "is-active" : ""}`}><FileText size={17} />Secure Contract Generator</NavLink></li>
+            <li><a href="https://github.com/sayeedur007-design/SmartContractGuardian" target="_blank" rel="noopener noreferrer" className="nav-link"><GitFork size={18} />GitHub</a></li>
+          </ul>
+        </nav>
       </div>
     </header>
   );

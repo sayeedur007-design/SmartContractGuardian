@@ -23,10 +23,6 @@ export const uploadContract = (formData) => {
   return fileApi.post("/upload-contract", formData);
 };
 
-export const fetchContractByAddress = (data) => {
-  return api.post("/fetch-contract", data);
-};
-
 // Analysis
 export const startAnalysis = (data) => {
   return api.post("/analyze", data);
