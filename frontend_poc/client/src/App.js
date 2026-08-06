@@ -309,7 +309,9 @@ function App() {
               element={
                 <>
                   <section className="landing-hero">
-                    <div className="hero-badge">✦&nbsp; AI-POWERED SECURITY ANALYSIS</div>
+                    <div className="hero-badge">
+                    🧠 RAG-POWERED LOCAL LLM
+                    </div>
                     <h1>Smart Contract Vulnerability <span>Analyzer</span></h1>
                     <p>Advanced AI-powered security analysis for Solidity smart contracts</p>
                     <ContractInput
