@@ -30,20 +30,32 @@ class SkepticAgent:
             **self.model_config.get_openai_args(self.model_name)
         )
 
-    def audit_vulnerabilities(self, contract_source: str, vulnerabilities: list, function_details: list = None) -> list:
+    def audit_vulnerabilities(self, contract_source: str, vulnerabilities: list,
+                             function_details: list = None, static_analysis_results=None) -> list:
         if not vulnerabilities:
             return []
 
         original_findings = [dict(finding) for finding in vulnerabilities]
-        allowed = known_function_ids(function_details or [])
+        # Preserve special Solidity entry points (constructor/fallback/receive)
+        # when the analyzer has resolved a finding to one of them.
+        allowed = {detail.get("function_id") for detail in (function_details or []) if detail.get("function_id")}
         if allowed:
-            vulnerabilities = [
-                {**finding, "affected_functions": normalize_affected_functions(finding.get("affected_functions", []), allowed)}
-                for finding in vulnerabilities
-            ]
-            vulnerabilities = [finding for finding in vulnerabilities if finding["affected_functions"]]
+            normalized_findings = []
+            for finding in vulnerabilities:
+                original = list(finding.get("affected_functions", []) or [])
+                normalized = normalize_affected_functions(original, allowed)
+                # Never erase unresolved source evidence after the analyzer
+                # intentionally preserved it for the generator.
+                normalized_findings.append({
+                    **finding,
+                    "affected_functions": normalized or original,
+                })
+            vulnerabilities = normalized_findings
+        # An unresolved LLM reference must not erase the vulnerability.  The
+        # skeptic can still assess the supplied source and reasoning, and the
+        # generator can apply a contract-wide remediation when needed.
         if not vulnerabilities:
-            print_warning("Skeptic input validation removed every finding; preserving Analyzer findings for review.")
+            print_warning("Skeptic received no findings; preserving Analyzer findings for review.")
             vulnerabilities = original_findings
 
         self._log_findings("Skeptic input", vulnerabilities)
@@ -155,60 +167,84 @@ Return ONLY valid JSON in this format:
                 progress.update(task, completed=True)
                 return fallback
 
-            # Merge each verdict by its original index. Missing verdicts are
-            # preserved rather than silently deleted; explicit rejections are
-            # logged and removed only when the model actually returned one.
-            verdicts = {}
-            for item in rechecked:
-                idx = item.get("original_idx")
-                if idx is not None and 0 <= idx < len(vulnerabilities):
-                    verdicts[idx] = item
-
-            accepted = []
-            for idx, finding in enumerate(vulnerabilities):
-                verdict = verdicts.get(idx)
-                if verdict is None:
-                    item = dict(finding)
-                    item["skeptic_confidence"] = float(item.get("confidence_score", 0.0))
-                    item["validity_reasoning"] = "Skeptic did not return a verdict for this finding; retained Analyzer finding."
-                    item["skeptic_status"] = "fallback_missing_verdict"
-                    accepted.append(item)
-                    continue
-                try:
-                    confidence = float(verdict.get("skeptic_confidence"))
-                except (TypeError, ValueError):
-                    confidence = None
-                reasoning = str(verdict.get("validity_reasoning", ""))
-                reasoning = self._ground_execution_order(finding, reasoning, contract_source)
-                evidence = verdict.get("evidence_lines", [])
-                if isinstance(evidence, str):
-                    evidence = [evidence]
-                has_evidence = any(str(line).strip() for line in evidence)
-                verdict_name = str(verdict.get("verdict", "INSUFFICIENT_EVIDENCE")).upper()
-                if confidence is None:
-                    print_warning(f"Skeptic verdict #{idx} has no numeric confidence; retaining Analyzer finding.")
-                    item = dict(finding)
-                    item["skeptic_confidence"] = float(item.get("confidence_score", 0.0))
-                    item["validity_reasoning"] = "Skeptic verdict had no valid confidence; retained Analyzer finding."
-                    item["skeptic_status"] = "fallback_invalid_verdict"
-                    accepted.append(item)
-                elif verdict_name == "REJECTED" and self._explicit_disproof(evidence, reasoning, contract_source):
-                    print_warning(f"Skeptic rejected {finding.get('vulnerability_type')}: {reasoning or 'explicit source disproof'}")
-                else:
-                    item = dict(finding)
-                    calibrated = self._calibrate_confidence(finding, confidence, evidence, contract_source, verdict_name)
-                    item["skeptic_confidence"] = calibrated
-                    item["confidence_score"] = calibrated
-                    item["validity_reasoning"] = reasoning or "INSUFFICIENT_EVIDENCE: retained without an explicit Solidity disproof."
-                    item["skeptic_evidence_lines"] = evidence
-                    item["skeptic_status"] = verdict_name if verdict_name in {"VERIFIED", "LIKELY", "NEEDS_REVIEW", "WEAK", "INSUFFICIENT_EVIDENCE"} else "INSUFFICIENT_EVIDENCE"
-                    item["confidence_level"] = self._confidence_level(calibrated, item["skeptic_status"])
-                    accepted.append(item)
+            accepted = self._merge_verdicts(
+                contract_source, vulnerabilities, rechecked, function_details or [], static_analysis_results
+            )
 
             progress.update(task, completed=True)
 
         self._log_findings("Skeptic merged output", accepted)
         return sorted(accepted, key=lambda x: x.get("skeptic_confidence", 0), reverse=True)
+
+    @classmethod
+    def _merge_verdicts(cls, contract_source: str, vulnerabilities: list, rechecked: list,
+                        function_details: list = None, static_analysis_results=None) -> list:
+        """Merge verdicts without allowing an LLM assertion to override source evidence."""
+        verdicts = {
+            item["original_idx"]: item for item in rechecked
+            if isinstance(item, dict) and isinstance(item.get("original_idx"), int)
+            and 0 <= item["original_idx"] < len(vulnerabilities)
+        }
+        accepted = []
+        for idx, finding in enumerate(vulnerabilities):
+            verdict = verdicts.get(idx)
+            if verdict is None:
+                item = dict(finding)
+                item.update({"skeptic_confidence": float(item.get("confidence_score", 0.0)),
+                             "validity_reasoning": "Skeptic did not return a verdict; retained as unverified.",
+                             "skeptic_status": "INSUFFICIENT_EVIDENCE", "confirmed": False,
+                             "evidence_source": "analyzer"})
+                accepted.append(item)
+                continue
+            try:
+                confidence = float(verdict.get("skeptic_confidence"))
+            except (TypeError, ValueError):
+                confidence = float(finding.get("confidence_score", 0.0) or 0.0)
+            reasoning = str(verdict.get("validity_reasoning", ""))
+            evidence = verdict.get("evidence_lines", [])
+            evidence = [evidence] if isinstance(evidence, str) else list(evidence or [])
+            verdict_name = str(verdict.get("verdict", "INSUFFICIENT_EVIDENCE")).upper()
+
+            semantic = cls._reentrancy_source_evidence(finding, contract_source, function_details or [])
+            if semantic["state"] == "vulnerable":
+                # A recipient can execute receive() or fallback() during a value call;
+                # the audited contract never needs to declare either entry point.
+                item = dict(finding)
+                item.update({"skeptic_confidence": max(0.95, confidence), "confidence_score": max(0.95, confidence),
+                             "validity_reasoning": semantic["reasoning"], "skeptic_evidence_lines": semantic["evidence"],
+                             "skeptic_status": "VERIFIED", "confirmed": True,
+                             "evidence_source": "source_semantic_verification"})
+                if semantic.get("function_id") and not item.get("affected_functions"):
+                    item["affected_functions"] = [semantic["function_id"]]
+                accepted.append(item)
+                continue
+
+            if semantic["state"] == "mitigated":
+                # CEI or a reentrancy guard is exact source disproof for this type.
+                if "reentrancy" in str(finding.get("vulnerability_type", "")).lower():
+                    continue
+
+            if verdict_name == "REJECTED":
+                if cls._has_independent_static_evidence(finding, static_analysis_results):
+                    item = dict(finding)
+                    item.update({"skeptic_confidence": max(0.85, confidence), "confidence_score": max(0.85, confidence),
+                                 "validity_reasoning": "Skeptic rejected the finding, but independent static-analysis evidence confirms it.",
+                                 "skeptic_status": "VERIFIED", "confirmed": True,
+                                 "evidence_source": "static_analysis"})
+                    accepted.append(item)
+                # An explicit REJECTED verdict with no independent evidence is removed.
+                continue
+
+            calibrated = cls._calibrate_confidence(finding, confidence, evidence, contract_source, verdict_name)
+            item = dict(finding)
+            status = verdict_name if verdict_name in {"VERIFIED", "LIKELY", "NEEDS_REVIEW", "WEAK", "INSUFFICIENT_EVIDENCE"} else "INSUFFICIENT_EVIDENCE"
+            item.update({"skeptic_confidence": calibrated, "confidence_score": calibrated,
+                         "validity_reasoning": reasoning or "Skeptic evidence is insufficient.",
+                         "skeptic_evidence_lines": evidence, "skeptic_status": status,
+                         "confirmed": status in {"VERIFIED", "LIKELY"}, "evidence_source": "skeptic"})
+            item["confidence_level"] = cls._confidence_level(calibrated, status)
+            accepted.append(item)
+        return accepted
 
     @staticmethod
     def _explicit_disproof(evidence: list, reasoning: str, contract_source: str) -> bool:

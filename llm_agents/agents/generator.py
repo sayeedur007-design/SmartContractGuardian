@@ -1,5 +1,6 @@
 """Foundry PoC generation with deterministic validation and compile gating."""
 import os
+import json
 import re
 import shutil
 import subprocess
@@ -161,6 +162,473 @@ class GeneratorAgent:
             "generation_error": failures[-1] if failures else "PoC generation failed after deterministic validation and Forge compilation.",
             "validation_errors": failures,
         }
+
+    def generate_secure_contract(self, source_code: str, vulnerabilities: List[Dict]) -> str:
+        """Rewrite and security-validate a contract using the configured model."""
+        findings = json.dumps(vulnerabilities, indent=2, default=str)
+        prompt = f"""You are the final secure-contract generation stage of a Solidity security pipeline.
+
+Act as an experienced Solidity security auditor, not a formatter. Apply the smallest source-level changes needed to eliminate every validated vulnerability. Preserve the exact contract name, pragma version, interfaces, inheritance, events, existing modifiers, storage layout where possible, function signatures, and external interface. Do not add unrelated functionality or remove legitimate behavior.
+
+SECURITY REQUIREMENTS:
+- Reentrancy: use checks-effects-interactions. Never make an external value call before its state effects. Use OpenZeppelin ReentrancyGuard only when its import is already available; otherwise use a minimal local guard only when needed.
+- Access control: retain intended authorization, protect privileged operations, validate ownership/role changes, and reject zero-address owners where applicable. Do not create privilege escalation paths.
+- Arithmetic: rely on Solidity 0.8+ checked arithmetic and do not use unchecked blocks unless they are demonstrably safe and documented in code.
+- Randomness: never present block.timestamp, block.number, blockhash, block.prevrandao, block.difficulty, msg.sender, msg.sig, tx.origin, or deterministic hashing as secure randomness. When external infrastructure is unavailable, preserve the interface with a deterministic helper and include exactly this comment: "For production-grade randomness, integrate Chainlink VRF or a commit-reveal protocol."
+- Calls: check low-level call return values and revert on failure. Do not introduce delegatecall, tx.origin, unsafe selfdestruct, or unbounded recipient-processing loops.
+- Inputs: validate security-critical external inputs and preserve existing meaningful validation.
+
+The output will be rejected if the reported vulnerability remains, if it introduces any of the unsafe patterns above, or if it contains TODOs, placeholders, markdown, or prose.
+
+VALIDATED VULNERABILITIES:
+{findings}
+
+CONTRACT SOURCE:
+{source_code}
+
+Return only the complete Solidity source code. Do not include markdown or an explanation."""
+        raw_response = self._chat(prompt)
+        generated = self._normalize_generated_solidity(self._clean_solidity(raw_response))
+        report = self._security_validation_report(generated, vulnerabilities, source_code)
+        quality = self._generation_quality_report(source_code, generated)
+        failures = report["blocking"] + quality["blocking"]
+        if not failures:
+            self._record_secure_generation_warnings(report["warnings"] + quality["warnings"])
+            return generated
+
+        repair_prompt = f"""Repair the generated Solidity contract below. It failed mandatory security validation.
+
+Keep the original contract's interface, events, modifiers, inheritance, and intended behavior. Return a complete replacement Solidity source file only: no markdown, JSON, explanation, TODOs, or placeholders.
+
+ORIGINAL CONTRACT:
+{source_code}
+
+VALIDATED VULNERABILITIES:
+{findings}
+
+PREVIOUS GENERATED CONTRACT:
+{generated}
+
+SECURITY OR GENERATION-QUALITY FAILURES TO FIX:
+{chr(10).join(f'- {failure}' for failure in failures)}
+"""
+        repaired = self._normalize_generated_solidity(self._clean_solidity(self._chat(repair_prompt)))
+        final_report = self._security_validation_report(repaired, vulnerabilities, source_code)
+        final_quality = self._generation_quality_report(source_code, repaired)
+        remaining = final_report["blocking"] + final_quality["blocking"]
+        if remaining:
+            raise ValueError(
+                "Generated contract failed security validation after one repair attempt: "
+                + "; ".join(remaining)
+            )
+        self._record_secure_generation_warnings(final_report["warnings"] + final_quality["warnings"])
+        return repaired
+
+    def _record_secure_generation_warnings(self, warnings: List[str]) -> None:
+        """Expose non-blocking validation guidance without rejecting a contract."""
+        self.last_secure_generation_warnings = warnings
+        for warning in warnings:
+            print_warning(f"Secure generator validation warning: {warning}")
+
+    @staticmethod
+    def _normalize_generated_solidity(source: str, diagnostics: str = "") -> str:
+        """Repair safe, mechanical Solidity generation artifacts before compilation.
+
+        This deliberately avoids semantic rewrites.  It removes duplicated
+        directives and orphaned SafeMath syntax, which is invalid when a
+        Solidity 0.8 contract has no SafeMath definition or import.
+        """
+        text = str(source or "").replace("\r\n", "\n")
+        text = re.sub(r"^\s*```(?:solidity|sol)?\s*$|^\s*```\s*$", "", text, flags=re.I | re.M)
+        lines, result = text.split("\n"), []
+        seen_pragmas, seen_spdx, seen_imports = set(), set(), set()
+        is_solidity_08 = bool(re.search(r"\bpragma\s+solidity\s+(?:\^?0\.8|>=\s*0\.8)", text))
+        has_safemath_definition = bool(re.search(r"\blibrary\s+SafeMath\b", text))
+        has_safemath_import = bool(re.search(r"\bimport\s+[^;]*\bSafeMath\b[^;]*;", text))
+        preserve_safemath = has_safemath_definition or has_safemath_import
+
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                result.append(line)
+                continue
+            if re.match(r"^//\s*SPDX-License-Identifier:\s*", stripped, re.I):
+                key = stripped.lower()
+                if key in seen_spdx:
+                    continue
+                seen_spdx.add(key)
+            elif re.match(r"^pragma\s+solidity\b", stripped, re.I):
+                key = stripped.rstrip(";").lower()
+                if key in seen_pragmas or seen_pragmas:
+                    continue
+                seen_pragmas.add(key)
+            elif re.match(r"^import\b", stripped):
+                key = re.sub(r"\s+", " ", stripped)
+                if key in seen_imports:
+                    continue
+                seen_imports.add(key)
+            if is_solidity_08 and not preserve_safemath:
+                if re.match(r"^using\s+SafeMath(?:\s+for\s+[^;]+)?\s*;?\s*$", stripped, re.I):
+                    continue
+            result.append(line)
+
+        normalized = "\n".join(result).strip()
+        if is_solidity_08 and not preserve_safemath:
+            normalized = re.sub(
+                r"\busing\s+SafeMath(?:\s+for\s+[^;\n]+)?\s*;", "", normalized, flags=re.I
+            )
+            # ``SafeMath`` is a library, not an inheritance base. A model can
+            # accidentally emit this alongside the obsolete using statement.
+            normalized = re.sub(
+                r"(\bcontract\s+[A-Za-z_]\w*)\s+is\s+SafeMath\b", r"\1", normalized
+            )
+        # Compiler output sometimes identifies an orphaned SafeMath statement
+        # that was emitted without a semicolon or formatting. Remove only that
+        # known obsolete construct; other diagnostics are left untouched.
+        if is_solidity_08 and not preserve_safemath and re.search(r"SafeMath", diagnostics, re.I):
+            normalized = re.sub(
+                r"(?im)^\s*using\s+SafeMath(?:\s+for\s+[^;\n]+)?\s*;?\s*$\n?", "", normalized
+            )
+        # A repeated complete contract is a common LLM artifact. Retain the
+        # first definition and discard later same-name blocks; this is a
+        # mechanical duplicate repair, not a contract rename.
+        duplicate_ranges, names = [], set()
+        declaration = re.compile(r"\b(?:contract|interface|library)\s+([A-Za-z_]\w*)\b[^{};]*\{")
+        for match in declaration.finditer(normalized):
+            name = match.group(1)
+            if name not in names:
+                names.add(name)
+                continue
+            depth = 1
+            end = match.end()
+            for index in range(match.end(), len(normalized)):
+                if normalized[index] == "{":
+                    depth += 1
+                elif normalized[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = index + 1
+                        break
+            duplicate_ranges.append((match.start(), end))
+        for start, end in reversed(duplicate_ranges):
+            normalized = normalized[:start] + normalized[end:]
+        return normalized.strip() + "\n"
+
+    @staticmethod
+    def _generation_quality_report(original: str, generated: str) -> Dict[str, List[str]]:
+        """Verify that a security rewrite retains the target's public identity."""
+        original_contracts = GeneratorAgent._contract_declarations(original, "contract")
+        generated_contracts = GeneratorAgent._contract_declarations(generated, "contract")
+        original_interfaces = GeneratorAgent._contract_declarations(original, "interface")
+        generated_interfaces = GeneratorAgent._contract_declarations(generated, "interface")
+        blocking, warnings = [], []
+
+        for name, bases in original_contracts.items():
+            if name not in generated_contracts:
+                blocking.append(f"High: original contract name {name} was not preserved")
+            elif bases != generated_contracts[name]:
+                blocking.append(f"High: inheritance for contract {name} was changed")
+        for name in original_interfaces:
+            if name not in generated_interfaces:
+                blocking.append(f"High: original interface {name} was not preserved")
+
+        missing_events = GeneratorAgent._event_signatures(original) - GeneratorAgent._event_signatures(generated)
+        for event in sorted(missing_events):
+            blocking.append(f"High: original event {event} was removed")
+
+        missing_signatures = (
+            GeneratorAgent._normalized_function_signatures(original)
+            - GeneratorAgent._normalized_function_signatures(generated)
+        )
+        for signature in sorted(missing_signatures):
+            blocking.append(f"High: original function signature {signature} was changed or removed")
+
+        original_modifiers = set(re.findall(r"\bmodifier\s+([A-Za-z_]\w*)\b", original))
+        generated_modifiers = set(re.findall(r"\bmodifier\s+([A-Za-z_]\w*)\b", generated))
+        for modifier in sorted(original_modifiers - generated_modifiers):
+            blocking.append(f"High: original modifier {modifier} was removed")
+        missing_modifier_use = GeneratorAgent._function_modifier_usage(original, original_modifiers) - GeneratorAgent._function_modifier_usage(generated, original_modifiers)
+        for signature, modifier in sorted(missing_modifier_use):
+            blocking.append(f"High: modifier {modifier} was removed from {signature}")
+
+        if GeneratorAgent._storage_layout(original) != GeneratorAgent._storage_layout(generated):
+            warnings.append("Medium: storage layout changed; confirm the change is required by the security fix")
+        if GeneratorAgent._pragma(original) != GeneratorAgent._pragma(generated):
+            blocking.append("High: generated Solidity pragma does not match the original contract")
+        return {"blocking": list(dict.fromkeys(blocking)), "warnings": list(dict.fromkeys(warnings))}
+
+    @staticmethod
+    def _contract_declarations(source: str, kind: str) -> Dict[str, tuple[str, ...]]:
+        declarations = {}
+        pattern = re.compile(
+            rf"\b(?:abstract\s+)?{re.escape(kind)}\s+([A-Za-z_]\w*)(?:\s+is\s+([^{{]+))?\s*{{", re.S
+        )
+        for match in pattern.finditer(source):
+            bases = tuple(part.strip() for part in (match.group(2) or "").split(",") if part.strip())
+            declarations[match.group(1)] = bases
+        return declarations
+
+    @staticmethod
+    def _event_signatures(source: str) -> set[str]:
+        return {
+            GeneratorAgent._normalize_solidity_type(re.sub(r"\s+", " ", event))
+            for event in re.findall(r"\bevent\s+[A-Za-z_]\w*\s*\([^;{}]*\)(?:\s+anonymous)?\s*;", source, re.S)
+        }
+
+    @staticmethod
+    def _normalize_solidity_type(solidity_type: str) -> str:
+        normalized = re.sub(r"\bunsigned\b", "uint256", solidity_type.strip())
+        normalized = re.sub(r"\buint\b", "uint256", normalized)
+        normalized = re.sub(r"\bint\b", "int256", normalized)
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    @staticmethod
+    def _normalized_function_signatures(source: str) -> set[str]:
+        signatures = set()
+        for name, parameters in re.findall(r"\bfunction\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", source, re.S):
+            types = []
+            for parameter in filter(None, (item.strip() for item in parameters.split(","))):
+                tokens = [token for token in parameter.split() if token not in {"memory", "storage", "calldata", "indexed"}]
+                if not tokens:
+                    continue
+                raw_type = " ".join(tokens[:2]) if tokens[:2] == ["address", "payable"] else tokens[0]
+                types.append(GeneratorAgent._normalize_solidity_type(raw_type))
+            signatures.add(canonical_function_id(name, types))
+        return signatures
+
+    @staticmethod
+    def _function_modifier_usage(source: str, known_modifiers: set[str]) -> set[tuple[str, str]]:
+        usage = set()
+        pattern = re.compile(r"\bfunction\s+([A-Za-z_]\w*)\s*\(([^)]*)\)([^;{]*)", re.S)
+        for name, parameters, suffix in pattern.findall(source):
+            types = []
+            for parameter in filter(None, (item.strip() for item in parameters.split(","))):
+                tokens = [token for token in parameter.split() if token not in {"memory", "storage", "calldata", "indexed"}]
+                if tokens:
+                    raw_type = " ".join(tokens[:2]) if tokens[:2] == ["address", "payable"] else tokens[0]
+                    types.append(GeneratorAgent._normalize_solidity_type(raw_type))
+            signature = canonical_function_id(name, types)
+            for modifier in known_modifiers:
+                if re.search(rf"\b{re.escape(modifier)}\b", suffix):
+                    usage.add((signature, modifier))
+        return usage
+
+    @staticmethod
+    def _storage_layout(source: str) -> List[str]:
+        """Return simple top-level state declarations in source order."""
+        layout, depth = [], 0
+        for line in GeneratorAgent._without_comments(source).splitlines():
+            stripped = line.strip()
+            if depth == 1 and ";" in stripped and not re.match(
+                r"(?:pragma|import|using|event|error|return|emit)\b", stripped
+            ) and not re.match(r"(?:function|modifier|constructor|fallback|receive)\b", stripped):
+                if re.match(r"(?:mapping\s*\(|[A-Za-z_]\w*)", stripped):
+                    layout.append(GeneratorAgent._normalize_solidity_type(re.sub(r"\s+", " ", stripped)))
+            depth += stripped.count("{") - stripped.count("}")
+        return layout
+
+    @staticmethod
+    def _solidity_functions(source: str) -> List[tuple[str, str, str]]:
+        """Return direct function name/header/body triples for lightweight security checks."""
+        functions = []
+        pattern = re.compile(r"\bfunction\s+([A-Za-z_]\w*)\s*\([^)]*\)[^{;]*\{", re.S)
+        for match in pattern.finditer(source):
+            depth = 1
+            for index in range(match.end(), len(source)):
+                if source[index] == "{":
+                    depth += 1
+                elif source[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        functions.append((match.group(1), match.group(0), source[match.end():index]))
+                        break
+        return functions
+
+    @staticmethod
+    def _security_validation_report(source: str, vulnerabilities: List[Dict],
+                                    original_source: str = "") -> Dict[str, List[str]]:
+        """Classify generated-source findings by severity.
+
+        This intentionally supplements Slither parsing: parsing confirms syntax,
+        while these checks confirm that a requested hardening was actually made.
+        Only Critical/High findings block delivery; Medium/Low findings are
+        retained as warnings for the operator.
+        """
+        code = GeneratorAgent._without_comments(str(source or ""))
+        blocking, warnings, informational = [], [], []
+        vuln_types = " ".join(
+            str(item.get("vulnerability_type", "")).lower()
+            for item in vulnerabilities if isinstance(item, dict)
+        )
+        functions = GeneratorAgent._solidity_functions(code)
+
+        if not re.search(r"\bpragma\s+solidity\s+(?:\^?0\.8|>=\s*0\.8)", code):
+            blocking.append("High: generated contract must use Solidity 0.8+ checked arithmetic")
+        if re.search(r"\b(?:TODO|FIXME|IMPLEMENT_ME|your[_ -]?code|placeholder)\b", code, re.I):
+            blocking.append("High: generated contract contains a placeholder or TODO")
+        if re.search(r"\btx\.origin\b", code):
+            blocking.append("Critical: tx.origin remains in generated Solidity")
+        if re.search(r"\.delegatecall\s*\(", code):
+            blocking.append("Critical: dangerous delegatecall remains in generated Solidity")
+        selfdestruct_blocking, selfdestruct_info = GeneratorAgent._validate_selfdestruct(
+            code, original_source
+        )
+        blocking.extend(selfdestruct_blocking)
+        informational.extend(selfdestruct_info)
+        if re.search(r"\bunchecked\s*\{", code):
+            warnings.append("Medium: unchecked arithmetic remains and requires manual review")
+
+        if any(term in vuln_types for term in ("random", "timestamp")):
+            status = GeneratorAgent._randomness_status(code)
+            original_status = GeneratorAgent._randomness_status(original_source)
+            if status == "UNSAFE" or (
+                original_source and status == "PARTIALLY IMPROVED" and original_status == "SECURE"
+            ):
+                blocking.append("High: generation introduced unsafe randomness")
+            elif status == "PARTIALLY IMPROVED":
+                warnings.append("Medium: randomness is partially improved; use VRF or commit-reveal for adversarial fairness")
+
+        state_write = re.compile(
+            r"\b(?!success\b|ok\b|sent\b)[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)*\s*(?:=|\+=|-=|\*=|/=)"
+        )
+        external_call = re.compile(r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|send\s*\(|transfer\s*\()")
+        low_level_call = re.compile(r"\.call\s*(?:\{[^}]*\}\s*)?\(")
+        for name, header, body in functions:
+            for call in external_call.finditer(body):
+                if state_write.search(body[call.end():]):
+                    blocking.append(f"High: {name} performs an external call before a state update (CEI violation)")
+                    break
+            for call in low_level_call.finditer(body):
+                assignment = re.search(
+                    r"\(\s*bool\s+([A-Za-z_]\w*)\s*,[^)]*\)\s*=\s*[^;]*$",
+                    body[max(0, call.start() - 240):call.start()], re.S,
+                )
+                checked = assignment and re.search(
+                    rf"\b(?:require|if)\s*\([^)]*\b{re.escape(assignment.group(1))}\b",
+                    body[call.end():call.end() + 300], re.S,
+                )
+                if not checked:
+                    blocking.append(f"High: {name} has a low-level call without checked success and revert handling")
+                    break
+
+        if any(term in vuln_types for term in ("access", "authoriz", "owner", "role")):
+            privileged_name = re.compile(
+                r"(?:set|change|transfer).*(?:owner|admin|role)|"
+                r"(?:mint|pause|unpause|upgrade|withdraw(?:fees)?|destroy)", re.I,
+            )
+            # Authorization is required by operation semantics, not merely by
+            # an analyzer label.  A public/view/internal helper such as
+            # ``random`` must not be made owner-only just because a separate
+            # access-control finding exists in the same report.
+            candidates = [entry for entry in functions if privileged_name.search(entry[0])]
+            for name, header, body in candidates:
+                if not re.search(r"\b(?:public|external)\b", header) or re.search(r"\b(?:view|pure)\b", header):
+                    continue
+                is_user_withdrawal, explanation = GeneratorAgent._is_user_withdrawal(name, body)
+                if is_user_withdrawal:
+                    informational.append(f"Informational: {explanation}")
+                    continue
+                if not GeneratorAgent._has_privileged_guard(header + body):
+                    intent = "administrative withdrawal" if re.search(
+                        r"(?:withdraw|treasury|emergency)", name, re.I
+                    ) else "privileged operation"
+                    blocking.append(
+                        f"High: {name} allows arbitrary callers to perform a {intent} without authorization"
+                    )
+                else:
+                    informational.append(f"Informational: {name} is restricted by an administrative authorization check")
+                if re.search(r"(?:owner|admin)\w*\s*\)", header, re.I) and not re.search(r"address\s*\(\s*0\s*\)", body):
+                    blocking.append(f"High: {name} does not validate a zero-address ownership/admin update")
+
+        if any(term in vuln_types for term in ("dos", "denial")):
+            if re.search(r"\bfor\s*\([^;]*;[^;]*\.length\s*;[^)]*\)[\s\S]{0,800}\.(?:call|send|transfer)\s*\(", code):
+                blocking.append("High: unbounded recipient-processing loop remains")
+
+        if any(term in vuln_types for term in ("input", "validation")):
+            for name, header, body in functions:
+                if re.search(r"\b(?:public|external)\b", header) and "(" in header and not re.search(r"\b(?:require|revert|if)\b", body):
+                    warnings.append(f"Medium: {name} has no visible security-critical input validation")
+
+        return {
+            "blocking": list(dict.fromkeys(blocking)),
+            "warnings": list(dict.fromkeys(warnings)),
+            "informational": list(dict.fromkeys(informational)),
+        }
+
+    @staticmethod
+    def _has_privileged_guard(text: str) -> bool:
+        return bool(re.search(
+            r"\b(?:onlyOwner|onlyRole|hasRole)\b|msg\.sender\s*==\s*(?:owner|admin)|"
+            r"(?:owner|admin)\s*==\s*msg\.sender", text,
+        ))
+
+    @staticmethod
+    def _is_user_withdrawal(name: str, body: str) -> tuple[bool, str]:
+        """Recognize withdrawals constrained to the caller's own accounting."""
+        if not re.search(r"withdraw", name, re.I):
+            return False, ""
+        if re.search(r"(?:emergency|treasury|fee)", name, re.I):
+            return False, ""
+        account = r"(?:balances|deposits|shares|credits|accounts)\s*\[\s*msg\.sender\s*\]"
+        checks_or_debits = re.search(
+            rf"{account}\s*(?:>=|>|-=|=\s*0)", body, re.I,
+        )
+        caller_payout = re.search(
+            r"(?:payable\s*\(\s*msg\.sender\s*\)|msg\.sender)\s*\.\s*"
+            r"(?:call|send|transfer)\b", body, re.I,
+        )
+        if checks_or_debits and caller_payout:
+            return True, "withdraw is correctly restricted to the caller's own recorded balance"
+        return False, ""
+
+    @staticmethod
+    def _validate_selfdestruct(source: str, original_source: str) -> tuple[List[str], List[str]]:
+        """Allow an original selfdestruct only when its destruction path is protected."""
+        if not re.search(r"\bselfdestruct\s*\(", source):
+            return [], []
+        if not re.search(r"\bselfdestruct\s*\(", str(original_source or "")):
+            return ["High: generated contract introduced selfdestruct outside the original business logic"], []
+
+        blocking, informational = [], []
+        for name, header, body in GeneratorAgent._solidity_functions(source):
+            if not re.search(r"\bselfdestruct\s*\(", body):
+                continue
+            beneficiary = re.search(r"\bselfdestruct\s*\(\s*payable\s*\(\s*([^)]+?)\s*\)\s*\)", body)
+            protected = GeneratorAgent._has_privileged_guard(header + body)
+            beneficiary_value = beneficiary.group(1).strip() if beneficiary else ""
+            safe_beneficiary = beneficiary_value in {"msg.sender", "owner", "admin", "treasury"}
+            if not protected:
+                blocking.append(f"High: {name} permits unrestricted contract destruction")
+            elif not safe_beneficiary:
+                blocking.append(f"High: {name} destroys the contract to an unverified beneficiary")
+            else:
+                informational.append(
+                    f"Informational: {name} retains original selfdestruct business logic behind authorization"
+                )
+        return blocking, informational
+
+    @staticmethod
+    def _randomness_status(source: str) -> str:
+        """Classify randomness without demanding an unavailable oracle."""
+        code = GeneratorAgent._without_comments(str(source or ""))
+        if re.search(r"\btx\.origin\b", code):
+            return "UNSAFE"
+        if re.search(r"\b(?:commit\w*\s*\(|reveal\w*\s*\(|vrf\w*\s*\(|requestRandom\w*\s*\(|randomnessProvider\b)", code, re.I):
+            return "SECURE"
+        if re.search(
+            r"\bblock\.(?:timestamp|number|prevrandao|difficulty)\b|"
+            r"\bblockhash\s*\(|\bmsg\.(?:sender|sig)\b|\btx\.origin\b", code, re.I,
+        ):
+            return "PARTIALLY IMPROVED"
+        return "SECURE"
+
+    @staticmethod
+    def _security_validation_failures(source: str, vulnerabilities: List[Dict],
+                                      original_source: str = "") -> List[str]:
+        """Compatibility helper returning only Critical/High blockers."""
+        return GeneratorAgent._security_validation_report(
+            source, vulnerabilities, original_source
+        )["blocking"]
 
     def generate_poc_contract(
         self, vulnerability: Dict, plan: Dict, target: Dict, failures: List[str], attempt: int,
@@ -618,9 +1086,10 @@ contract PocTest is BaseTestWithBalanceLog {{
         for name, raw_params in re.findall(r"\bfunction\s+([A-Za-z_]\w*)\s*\(([^)]*)\)", source):
             types = []
             for raw_param in filter(None, (part.strip() for part in raw_params.split(","))):
-                tokens = [token for token in raw_param.split() if token not in {"memory", "storage", "calldata", "payable"}]
+                tokens = [token for token in raw_param.split() if token not in {"memory", "storage", "calldata"}]
                 if tokens:
-                    types.append(tokens[0])
+                    raw_type = " ".join(tokens[:2]) if tokens[:2] == ["address", "payable"] else tokens[0]
+                    types.append(GeneratorAgent._normalize_solidity_type(raw_type))
             functions.append(canonical_function_id(name, types))
         return functions
 
@@ -993,8 +1462,39 @@ SOLIDITY:
 
     @staticmethod
     def _clean_solidity(response: str) -> str:
-        match = re.search(r"```(?:solidity)?\s*([\s\S]*?)\s*```", response)
-        return (match.group(1) if match else response).strip()
+        """Extract Solidity from markdown, JSON wrappers, or leading prose."""
+        text = str(response or "").strip()
+        if not text:
+            return ""
+
+        # Prefer a Solidity-labelled fence.  A response may contain another
+        # fenced example before the actual contract, so never take the first
+        # arbitrary fence by default.
+        fences = re.findall(r"```\s*([A-Za-z0-9_-]*)\s*\n?([\s\S]*?)```", text)
+        solidity_fences = [body for language, body in fences if language.lower() in {"solidity", "sol"}]
+        if solidity_fences:
+            text = solidity_fences[0]
+        elif fences:
+            with_pragma = [body for _, body in fences if re.search(r"\bpragma\s+solidity\b", body, re.I)]
+            if with_pragma:
+                text = with_pragma[0]
+
+        # Accept the common JSON wrappers emitted despite the code-only
+        # instruction.  Do not parse arbitrary prose as JSON.
+        if text.startswith("{"):
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                for key in ("solidity", "source_code", "generated_code", "contract", "code"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and re.search(r"\bpragma\s+solidity\b", value, re.I):
+                        text = value
+                        break
+
+        pragma = re.search(r"\bpragma\s+solidity\b", text, re.I)
+        return text[pragma.start():].strip() if pragma else text.strip()
 
     @staticmethod
     def _without_comments(text: str) -> str:

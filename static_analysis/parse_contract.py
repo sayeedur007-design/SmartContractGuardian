@@ -42,9 +42,17 @@ def analyze_contract(filepath: str):
         print(f"Error preprocessing contract: {e}")
         # Continue with the original filepath
     
+    # CryticCompile on Windows can misinterpret an absolute drive path as a
+    # Solidity project path. Keep source metadata absolute, but give Slither a
+    # path relative to the running project so uploaded contracts work in both
+    # the analyzer and secure-generation flows.
+    slither_target = filepath
+    if os.name == "nt" and os.path.isabs(filepath):
+        slither_target = os.path.relpath(filepath, os.getcwd())
+
     # Initialize Slither on the given file. This parses and compiles the contract.
     slither = Slither(
-        filepath,
+        slither_target,
         solc_args="--via-ir --optimize",
         solc_remaps=solc_remaps,
     )

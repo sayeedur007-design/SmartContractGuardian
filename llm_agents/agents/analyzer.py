@@ -12,6 +12,7 @@ from openai import OpenAI
 from langchain.schema import Document
 from .project_context_llm import ProjectContextLLMAgent
 from utils.function_identifiers import known_function_ids
+from eth_utils import keccak
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,17 @@ class AnalyzerAgent:
 
     def analyze(self, contract_info: Dict) -> Dict:
         try:
+            contract_name = contract_info.get("target_contract", {}).get("name") or next(
+                (detail.get("contract") for detail in contract_info.get("function_details", []) if detail.get("contract")),
+                "<unknown>",
+            )
+            logger.info(
+                "Analyzer input: source_file=%s contract=%s source_bytes=%d functions=%d",
+                contract_info.get("target_contract", {}).get("path", "<unknown>"),
+                contract_name,
+                len(contract_info.get("source_code", "")),
+                len(contract_info.get("function_details", [])),
+            )
             with create_progress_spinner("Analyzing contract vulnerabilities") as progress:
                 task = progress.add_task("Searching for vulnerability patterns...")
                 query_text = self._build_query_text(contract_info)
@@ -54,9 +66,11 @@ class AnalyzerAgent:
                 # Check if retriever is enabled
                 if self.retriever:
                     relevant_docs = self.retriever.invoke(query_text)
+                    logger.info("Analyzer RAG results: %d", len(relevant_docs))
                     progress.update(task, description=f"Found {len(relevant_docs)} relevant patterns")
                 else:
                     relevant_docs = []
+                    logger.info("Analyzer RAG results: 0 (disabled)")
                     progress.update(task, description="RAG disabled, using direct analysis")
 
                 # Build prompts
@@ -79,7 +93,9 @@ class AnalyzerAgent:
                 )
                 try:
                     response_text = self._call_llm(system_prompt, user_prompt)
+                    logger.info("Analyzer raw LLM response: %s", response_text)
                     vulnerabilities = self._parse_llm_response(response_text)
+                    logger.info("Analyzer parsed LLM findings: %d", len(vulnerabilities))
                 except Exception as exc:
                     logger.warning("Local LLM analysis unavailable; continuing with deterministic findings: %s", exc)
                     print_warning(f"Local LLM analysis unavailable; using verified static findings: {exc}")
@@ -88,9 +104,11 @@ class AnalyzerAgent:
                 # Parse results
                 progress.update(task, description="Processing results...")
                 vulnerabilities = self._add_deterministic_findings(vulnerabilities, contract_info)
+                logger.info("Analyzer findings after source/static evidence merge: %d", len(vulnerabilities))
                 vulnerabilities = self._validate_findings(vulnerabilities, contract_info)
                 vulnerabilities = self._deduplicate_vulnerabilities(vulnerabilities)
                 self._attach_code_snippets(vulnerabilities, contract_info)
+                logger.info("Analyzer final findings: %s", [v.get("vulnerability_type") for v in vulnerabilities])
 
                 progress.update(task, completed=True)
 
@@ -143,23 +161,87 @@ class AnalyzerAgent:
 
     @staticmethod
     def _add_deterministic_findings(vulnerabilities: list, contract_info: Dict) -> list:
-        """Backstop high-signal Solidity patterns that must not depend on LLM JSON quality."""
-        source = contract_info.get("source_code", "")
+        """Merge direct source and static evidence that must not depend on LLM output.
+
+        This deliberately works per externally callable function.  A contract-wide
+        ``onlyOwner`` search is unsafe: one protected function must not protect an
+        unrelated public function.
+        """
         existing = {str(item.get("vulnerability_type", "")).lower() for item in vulnerabilities}
         findings = [item for item in vulnerabilities if item.get("vulnerability_type") != "unknown"]
+        details = AnalyzerAgent._source_function_details(contract_info)
 
-        details = contract_info.get("function_details", [])
+        def protected(detail):
+            modifiers = " ".join(detail.get("modifiers", []) or [])
+            body = detail.get("content", "") or ""
+            return bool(re.search(
+                r"(?:only(?:owner|admin|role)|auth|authorized|admin|role)", modifiers, re.I
+            ) or re.search(
+                r"(?:onlyOwner|onlyRole|hasRole|_checkRole|require\s*\([^;]*(?:msg\.sender\s*==\s*\w+|\w+\s*==\s*msg\.sender)|if\s*\([^)]*(?:msg\.sender\s*!=|!hasRole))",
+                body, re.I
+            ))
+
+        def public_or_external(detail):
+            return str(detail.get("visibility", "")).lower() in {"public", "external"}
+
+        def privileged_write(detail):
+            body = detail.get("content", "") or ""
+            # Assignment to a privilege-bearing state variable is a privileged
+            # administration operation.  User-owned balance writes are excluded.
+            return bool(re.search(
+                r"\b(?:owner|admin(?:istrator)?|controller|operator|privileged|roles?)\b\s*(?:\[[^\]]+\])?\s*=",
+                body, re.I
+            ))
+
+        direct_rules = [
+            ("access_control", 0.90, "High", "Restrict the privileged operation with an authorization check.",
+             lambda detail: public_or_external(detail) and privileged_write(detail) and not protected(detail),
+             "An externally callable function changes privileged state without an authorization check."),
+            ("dangerous_selfdestruct", 0.95, "High", "Remove selfdestruct or strictly protect it with authorization.",
+             lambda detail: public_or_external(detail) and re.search(r"\bselfdestruct\s*\(", detail.get("content", "") or "", re.I) and not protected(detail),
+             "An externally callable function reaches selfdestruct without an authorization check."),
+        ]
+        for vuln_type, confidence, severity, remediation, predicate, evidence in direct_rules:
+            if vuln_type in existing:
+                continue
+            affected = [detail["function_id"] for detail in details if predicate(detail)]
+            if affected:
+                findings.append({
+                    "vulnerability_type": vuln_type, "confidence_score": confidence,
+                    "reasoning": f"Deterministic source evidence: {evidence}",
+                    "affected_functions": affected, "impact": severity, "severity": severity,
+                    "remediation": remediation,
+                    "exploitation_scenario": "Any account can invoke the affected externally callable function.",
+                })
+                existing.add(vuln_type)
+
+        # Slither is an independent signal.  Preserve its high-signal suicidal
+        # result even when a model returns an empty list; direct source checks
+        # above remain the authority for the affected function and remediation.
+        static_descriptions = AnalyzerAgent._detector_descriptions(contract_info.get("detector_results", []))
+        logger.info("Analyzer static-analysis findings: %s", static_descriptions)
+        if "dangerous_selfdestruct" not in existing and any(
+            re.search(r"\b(?:suicid(?:al|e)?|selfdestruct|destruct)\b", description, re.I)
+            for description in static_descriptions
+        ):
+            affected = [detail["function_id"] for detail in details if re.search(r"\bselfdestruct\s*\(", detail.get("content", ""), re.I)]
+            if affected:
+                findings.append({
+                    "vulnerability_type": "dangerous_selfdestruct", "confidence_score": 0.90,
+                    "reasoning": "Static-analysis evidence: Slither reported an unrestricted destruction path. " + static_descriptions[0],
+                    "affected_functions": affected, "impact": "High", "severity": "High",
+                    "remediation": "Remove selfdestruct or strictly protect it with authorization.",
+                    "exploitation_scenario": "Any account can invoke the reported destruction path.",
+                })
+                existing.add("dangerous_selfdestruct")
+
         rules = [
             ("reentrancy", 0.95, "High", "Apply checks-effects-interactions and a reentrancy guard.",
              lambda text: re.search(r"\.call\s*\{[^}]*value\s*:", text, re.I) and re.search(r"\.call[\s\S]*?(?:balances|\w+)\s*\[?[^;]*[-+]?=", text, re.I)),
-            ("access_control", 0.85, "High", "Restrict the privileged operation with an authorization check.",
-             lambda text: re.search(r"function\s+(?:changeOwner|transferOwnership|setOwner)\b", text, re.I) and not re.search(r"onlyOwner|require\s*\([^;]*(?:owner|admin|role)", text, re.I)),
             ("timestamp_dependence", 0.65, "Medium", "Avoid using miner-influenced time in security-sensitive decisions.",
              lambda text: re.search(r"block\.timestamp", text) and re.search(r"(?:require|if|keccak|random|winner|payout|transfer|call|=)\s*[\s\S]{0,120}block\.timestamp|block\.timestamp[\s\S]{0,120}(?:require|if|keccak|random|winner|payout|transfer|call|=)", text, re.I)),
             ("integer_overflow", 0.75, "Medium", "Remove unchecked arithmetic or validate bounds before state updates.",
              lambda text: re.search(r"unchecked\s*\{[\s\S]*?(?:\+\+|--|\+=|-=|\*=)", text, re.I)),
-            ("dangerous_selfdestruct", 0.80, "High", "Remove selfdestruct or strictly protect it with authorization.",
-             lambda text: re.search(r"function\s+\w+[^\{]*\b(?:external|public)\b[^\{]*\{[\s\S]*?selfdestruct\s*\(", text, re.I) and not re.search(r"onlyOwner|require\s*\([^;]*(?:owner|admin|role)", text, re.I)),
             ("denial_of_service", 0.70, "Medium", "Use pull payments or bounded batches for recipient processing.",
              lambda text: re.search(r"for\s*\([^)]*;[^)]*\.length[\s\S]*?\.(?:transfer|send|call)\s*\(", text, re.I)),
         ]
@@ -178,7 +260,53 @@ class AnalyzerAgent:
         return findings
 
     @staticmethod
-    def _normalize_function_reference_for_lookup(value, allowed: set) -> str | None:
+    def _detector_descriptions(detector_results) -> list:
+        """Extract Slither result text without assuming a specific result shape."""
+        descriptions = []
+
+        def visit(value):
+            if isinstance(value, dict):
+                for key in ("description", "check", "markdown"):
+                    if isinstance(value.get(key), str):
+                        descriptions.append(value[key].replace("\n", " ").strip())
+                for nested in value.values():
+                    visit(nested)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    visit(nested)
+
+        visit(detector_results)
+        return list(dict.fromkeys(description for description in descriptions if description))
+
+    @staticmethod
+    def _source_function_details(contract_info: Dict) -> list:
+        """Return function metadata, falling back to the uploaded source when needed."""
+        details = [dict(detail) for detail in contract_info.get("function_details", [])]
+        if details and all(detail.get("content") for detail in details):
+            return details
+
+        source = contract_info.get("source_code", "")
+        by_name = {detail.get("function"): detail for detail in details if detail.get("function")}
+        pattern = re.compile(r"function\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*([^\{;]*)\{", re.I)
+        for match in pattern.finditer(source):
+            depth, index = 1, match.end()
+            while index < len(source) and depth:
+                depth += (source[index] == "{") - (source[index] == "}")
+                index += 1
+            header = match.group(2)
+            name = match.group(1)
+            detail = dict(by_name.get(name, {}))
+            detail.setdefault("function_id", f"{name}()")
+            detail.setdefault("function", name)
+            detail["visibility"] = "external" if re.search(r"\bexternal\b", header) else ("public" if re.search(r"\bpublic\b", header) else detail.get("visibility", ""))
+            detail["content"] = source[match.start():index]
+            details = [item for item in details if item.get("function") != name] + [detail]
+        return details
+
+    @staticmethod
+    def _normalize_function_reference_for_lookup(value, allowed: set,
+                                                 function_details: list = None,
+                                                 source_code: str = "") -> str | None:
         """Resolve an LLM function reference to a known canonical function ID.
 
         LLMs occasionally append analysis-specific identifiers (for example,
@@ -198,9 +326,67 @@ class AnalyzerAgent:
         if not candidate:
             return None
 
+        details = function_details or []
+
+        # Models commonly cite static-analysis locations (for example,
+        # ``OwnershipBug.sol#11``).  Resolve those against Slither's source
+        # line ranges before attempting name matching; this also disambiguates
+        # overloaded and inherited declarations.
+        line_match = re.search(r"#(?:line:)?(\d+)$", candidate, re.I)
+        if line_match:
+            line = int(line_match.group(1))
+            matches = [
+                detail.get("function_id") for detail in details
+                if detail.get("function_id")
+                and detail.get("start_line") is not None
+                and detail.get("end_line") is not None
+                and int(detail["start_line"]) <= line <= int(detail["end_line"])
+            ]
+            if len(matches) == 1:
+                logger.info("Mapped affected-function reference %r by line %d to %s", value, line, matches[0])
+                return matches[0]
+            logger.info("Could not uniquely map affected-function reference %r by line %d", value, line)
+
+        # Support byte/character offsets emitted by AST and compiler tools.
+        offset_match = re.search(r"(?:#|@|offset:|byte:)(\d+)$", candidate, re.I)
+        if offset_match and source_code:
+            offset = int(offset_match.group(1))
+            line_starts = [0]
+            line_starts.extend(index + 1 for index, char in enumerate(source_code) if char == "\n")
+            matches = []
+            for detail in details:
+                if not detail.get("function_id") or detail.get("start_line") is None or detail.get("end_line") is None:
+                    continue
+                start_line, end_line = int(detail["start_line"]), int(detail["end_line"])
+                if start_line < 1 or end_line > len(line_starts):
+                    continue
+                start = line_starts[start_line - 1]
+                end = line_starts[end_line] if end_line < len(line_starts) else len(source_code)
+                if start <= offset < end:
+                    matches.append(detail["function_id"])
+            if len(matches) == 1:
+                logger.info("Mapped affected-function reference %r by byte offset %d to %s", value, offset, matches[0])
+                return matches[0]
+            logger.info("Could not uniquely map affected-function reference %r by byte offset %d", value, offset)
+
         # Contract qualification is presentation metadata, not part of the
         # ABI-style IDs stored in ``allowed``.
         short_name = candidate.rsplit(".", 1)[-1].replace(" ", "")
+
+        # Preserve contract qualification when it is supplied.  It is needed
+        # to distinguish inherited declarations with matching signatures.
+        qualified_match = re.search(r"(?:^|[.:])([A-Za-z_]\w*)\.([A-Za-z_]\w*(?:\([^)]*\))?)$", candidate.replace(" ", ""))
+        if qualified_match:
+            contract_name, function_ref = qualified_match.groups()
+            qualified = [
+                detail.get("function_id") for detail in details
+                if str(detail.get("contract", "")).lower() == contract_name.lower()
+                and detail.get("function_id")
+                and (detail["function_id"] == function_ref or detail["function_id"].split("(", 1)[0] == function_ref.rstrip("()"))
+            ]
+            if len(qualified) == 1:
+                logger.info("Mapped qualified affected-function reference %r to %s", value, qualified[0])
+                return qualified[0]
 
         # Strip trailing analysis/compiler artifacts, but only when they are
         # separated from the function reference.  Supported artifacts include
@@ -214,44 +400,84 @@ class AnalyzerAgent:
         normalized = artifact_suffix.sub("", short_name)
 
         if normalized in allowed:
+            logger.info("Mapped affected-function reference %r directly to %s", value, normalized)
             return normalized
+
+        # A four-byte ABI selector is enough to identify a non-overloaded
+        # signature.  Some models surface that selector instead of the
+        # human-readable function ID supplied in the prompt.
+        selector = normalized.lower()
+        if re.fullmatch(r"0x[0-9a-f]{8}", selector):
+            matches = [
+                function_id for function_id in allowed
+                if "0x" + keccak(text=function_id).hex()[:8] == selector
+            ]
+            if len(matches) == 1:
+                logger.info("Mapped selector %r to %s", value, matches[0])
+                return matches[0]
+
+        if re.fullmatch(r"0x[0-9a-f]{64}", selector):
+            matches = [
+                function_id for function_id in allowed
+                if "0x" + keccak(text=function_id).hex() == selector
+            ]
+            if len(matches) == 1:
+                logger.info("Mapped function-signature hash %r to %s", value, matches[0])
+                return matches[0]
 
         name = normalized.split("(", 1)[0]
         matches = [function_id for function_id in allowed if function_id.split("(", 1)[0] == name]
         # Signature-less references (including ``withdraw()``) are only safe
         # when the contract has a single overload with that name.
         if len(matches) == 1 and ("(" not in normalized or normalized.endswith("()")):
+            logger.info("Mapped affected-function reference %r by name to %s", value, matches[0])
             return matches[0]
+        logger.info("Unable to map affected-function reference %r", value)
         return None
 
     @classmethod
-    def _normalize_affected_functions_for_lookup(cls, values, allowed: set) -> List[str]:
+    def _normalize_affected_functions_for_lookup(cls, values, allowed: set,
+                                                 function_details: list = None,
+                                                 source_code: str = "") -> List[str]:
         """Return unique canonical IDs for lookup without changing report labels."""
         normalized = []
         for value in values or []:
-            resolved = cls._normalize_function_reference_for_lookup(value, allowed)
+            resolved = cls._normalize_function_reference_for_lookup(
+                value, allowed, function_details, source_code
+            )
             if resolved and resolved not in normalized:
                 normalized.append(resolved)
         return normalized
 
     @staticmethod
     def _validate_findings(vulnerabilities: list, contract_info: Dict) -> list:
-        """Drop hallucinations instead of allowing them into the skeptic stage."""
-        allowed = known_function_ids(contract_info.get("function_details", []))
+        """Validate references without discarding otherwise valid findings."""
+        details = contract_info.get("function_details", [])
+        # Constructors, fallback, and receive functions are valid source
+        # targets even though the PoC-specific ID helper excludes them.
+        allowed = {detail.get("function_id") for detail in details if detail.get("function_id")}
         validated = []
         for finding in vulnerabilities:
             if not isinstance(finding, dict) or not finding.get("vulnerability_type"):
                 continue
             affected = AnalyzerAgent._normalize_affected_functions_for_lookup(
-                finding.get("affected_functions", []), allowed
+                finding.get("affected_functions", []), allowed, details, contract_info.get("source_code", "")
             )
-            # A source-level finding must identify an exact analyzed function.
-            if not affected:
-                logger.warning("Dropping finding %r with unknown affected functions %r", finding.get("vulnerability_type"), finding.get("affected_functions"))
-                continue
-            # Keep the LLM's original function label for diagnostics and
-            # reporting. ``affected`` is intentionally used only for lookup.
-            validated.append(finding)
+            item = dict(finding)
+            if affected:
+                # Use canonical IDs downstream so snippets, reviewer prompts,
+                # and generation all refer to the actual Solidity function.
+                item["affected_functions"] = affected
+            else:
+                # Hashes, addresses, and opaque IDs cannot always be mapped
+                # back to a source declaration. Preserve them for the
+                # generator rather than degrading useful evidence to [].
+                logger.warning(
+                    "Keeping finding %r with unresolved affected functions %r",
+                    finding.get("vulnerability_type"), finding.get("affected_functions"),
+                )
+                item["affected_functions"] = list(finding.get("affected_functions") or [])
+            validated.append(item)
         return validated
 
     def _summarize_detector_results(self, detector_results) -> str:

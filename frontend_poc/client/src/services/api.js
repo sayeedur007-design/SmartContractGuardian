@@ -23,6 +23,10 @@ export const uploadContract = (formData) => {
   return fileApi.post("/upload-contract", formData);
 };
 
+export const generateSecureContract = (formData) => {
+  return fileApi.post("/generate-secure-contract", formData);
+};
+
 // Analysis
 export const startAnalysis = (data) => {
   return api.post("/analyze", data);

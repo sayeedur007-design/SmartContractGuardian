@@ -1,6 +1,7 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 import os
 import json
 import threading
@@ -9,6 +10,7 @@ import sys
 import uuid
 import re
 import subprocess
+import shutil
 from typing import Dict, Tuple, List, Optional
 from datetime import datetime
 
@@ -42,6 +44,8 @@ jobs = {}
 # Store uploaded contracts
 UPLOAD_FOLDER = os.path.join(PROJECT_ROOT, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+SECURE_CONTRACT_FOLDER = os.path.join(UPLOAD_FOLDER, 'secure_contracts')
+os.makedirs(SECURE_CONTRACT_FOLDER, exist_ok=True)
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
@@ -75,6 +79,186 @@ def upload_contract():
         'status': 'uploaded',
         'message': 'Contract uploaded successfully'
     })
+
+
+def _clean_generated_solidity(source):
+    """Extract Solidity from a model response and reject incomplete output."""
+    # The generator normally cleans its own response.  Retain a defensive
+    # endpoint-level pass for direct/mocked responses and select a Solidity
+    # block rather than an unrelated first markdown block.
+    source = str(source or "").strip()
+    if source.startswith('{'):
+        try:
+            payload = json.loads(source)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        if isinstance(payload, dict):
+            for key in ('solidity', 'source_code', 'generated_code', 'contract', 'code'):
+                value = payload.get(key)
+                if isinstance(value, str) and re.search(r"\bpragma\s+solidity\b", value, re.I):
+                    source = value
+                    break
+    fences = re.findall(r"```\s*([A-Za-z0-9_-]*)\s*\n?([\s\S]*?)```", source)
+    solidity_fences = [body for language, body in fences if language.lower() in {"solidity", "sol"}]
+    if solidity_fences:
+        source = solidity_fences[0]
+    elif fences:
+        with_pragma = [body for _, body in fences if re.search(r"\bpragma\s+solidity\b", body, re.I)]
+        if with_pragma:
+            source = with_pragma[0]
+    pragma = re.search(r"\bpragma\s+solidity\b", source, re.IGNORECASE)
+    if pragma:
+        source = source[pragma.start():]
+    if not re.search(r"\bpragma\s+solidity\b", source):
+        raise ValueError("The generator did not return a Solidity contract with a pragma statement.")
+    if not re.search(r"\b(?:contract|interface|library)\s+\w+", source):
+        raise ValueError("The generator did not return a complete Solidity contract.")
+    # A model can append a sentence after otherwise valid Solidity.  The last
+    # closing brace is the end of the top-level source in normal contract
+    # output, so avoid writing that prose into the .sol file.
+    last_brace = source.rfind('}')
+    return source[:last_brace + 1].strip() if last_brace >= 0 else source
+
+
+def _compile_secure_contract(contract_path):
+    """Compile once, normalize mechanical generation mistakes, then retry once."""
+    solc_path = shutil.which('solc')
+    if not solc_path:
+        return 'Not available (solc is not installed)', ''
+
+    def compile_once():
+        return subprocess.run(
+            [solc_path, '--bin', contract_path],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=SECURE_CONTRACT_FOLDER,
+        )
+
+    completed = compile_once()
+    if completed.returncode != 0:
+        # This is intentionally source normalization, not API behavior. It
+        # repairs only mechanical LLM artifacts and retries the compiler once.
+        from llm_agents.agents.generator import GeneratorAgent
+        with open(contract_path, 'r', encoding='utf-8') as contract_file:
+            original = contract_file.read()
+        diagnostics = (completed.stderr or completed.stdout or '')
+        normalized = GeneratorAgent._normalize_generated_solidity(original, diagnostics)
+        if normalized != original:
+            with open(contract_path, 'w', encoding='utf-8', newline='\n') as contract_file:
+                contract_file.write(normalized)
+            completed = compile_once()
+        if completed.returncode != 0:
+            return 'Failed', (completed.stderr or completed.stdout or 'Solidity compilation failed.').strip()
+    return 'Passed', ''
+
+
+@app.route('/api/generate-secure-contract', methods=['POST'])
+def generate_secure_contract():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file was uploaded.'}), 400
+
+    uploaded_file = request.files['file']
+    uploaded_filename = uploaded_file.filename or ''
+    filename = secure_filename(uploaded_filename)
+    if not filename:
+        return jsonify({'error': 'No file was selected.'}), 400
+    if not filename.lower().endswith('.sol'):
+        return jsonify({'error': 'Please upload a Solidity (.sol) file.'}), 400
+
+    generation_id = str(uuid.uuid4())
+    temporary_path = os.path.join(UPLOAD_FOLDER, f'{generation_id}_{filename}')
+    uploaded_file.save(temporary_path)
+    app.logger.info('Secure contract generation upload received: %s', uploaded_filename)
+
+    try:
+        # Match the analyzer's contract-loading flow: Slither produces the
+        # function, call graph, and detector data consumed by the coordinator.
+        function_details, call_graph, detector_results = analyze_contract(temporary_path)
+        with open(temporary_path, 'r', encoding='utf-8') as source_file:
+            source_code = source_file.read()
+
+        contract_info = {
+            'function_details': function_details,
+            'call_graph': call_graph,
+            'source_code': source_code,
+            'detector_results': detector_results,
+            'target_contract': {'path': filename},
+            # A single upload is the same isolated project-context input used
+            # by the analyzer for a standalone contract.
+            'contracts_dir': temporary_path,
+        }
+        model_config = ModelConfig(
+            context_model='ollama',
+            analyzer_model='ollama',
+            skeptic_model='ollama',
+            exploiter_model='ollama',
+            generator_model='ollama',
+            skip_poc_generation=True,
+        )
+        coordinator = SocketIOAgentCoordinator(
+            generation_id,
+            model_config=model_config,
+            use_rag=True,
+        )
+        analysis_results = coordinator.analyze_contract(
+            contract_info,
+            auto_run_config={'auto_run': False, 'max_retries': 0},
+        )
+        vulnerabilities = analysis_results.get('rechecked_vulnerabilities', [])
+        generated_source = _clean_generated_solidity(
+            coordinator.generator.generate_secure_contract(source_code, vulnerabilities)
+        )
+
+        output_filename = f'{generation_id}_secure_{filename}'
+        output_path = os.path.join(SECURE_CONTRACT_FOLDER, output_filename)
+        with open(output_path, 'w', encoding='utf-8', newline='\n') as output_file:
+            output_file.write(generated_source)
+
+        compile_status, compile_error = _compile_secure_contract(output_path)
+        if compile_status == 'Failed':
+            os.remove(output_path)
+            raise ValueError(f'Generated contract did not compile: {compile_error}')
+
+        # Slither validation is performed on the generated source, not merely
+        # the uploaded input. A failed parse or validation prevents download.
+        try:
+            analyze_contract(output_path)
+        except Exception as validation_error:
+            os.remove(output_path)
+            raise ValueError(f'Generated contract failed Slither validation: {validation_error}') from validation_error
+
+        vulnerabilities_detected = len(vulnerabilities)
+        return jsonify({
+            'success': True,
+            'generated_code': generated_source,
+            'security_summary': f'Generated and validated a secure contract after analyzing {vulnerabilities_detected} confirmed vulnerability finding(s).',
+            'vulnerabilities_detected': vulnerabilities_detected,
+            'validation_status': 'Passed',
+            'compile_status': compile_status,
+            'download_url': f'/api/secure-contracts/{generation_id}/download',
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Secure contract compilation timed out.'}), 504
+    except Exception as error:
+        app.logger.exception('Secure contract generation failed for %s', uploaded_filename)
+        return jsonify({'error': f'Unable to generate a secure contract: {str(error)}'}), 500
+
+
+@app.route('/api/secure-contracts/<generation_id>/download', methods=['GET'])
+def download_secure_contract(generation_id):
+    matching_files = [
+        filename for filename in os.listdir(SECURE_CONTRACT_FOLDER)
+        if filename.startswith(f'{generation_id}_secure_') and filename.endswith('.sol')
+    ]
+    if not matching_files:
+        return jsonify({'error': 'Secure contract not found.'}), 404
+
+    path = os.path.join(SECURE_CONTRACT_FOLDER, matching_files[0])
+    original_name = matching_files[0].split('_secure_', 1)[-1]
+    name, extension = os.path.splitext(original_name)
+    download_name = f'{name}_secure{extension}'
+    return send_file(path, as_attachment=True, download_name=download_name, mimetype='text/plain')
 
 @app.route('/api/fetch-contract', methods=['POST'])
 def fetch_contract():
