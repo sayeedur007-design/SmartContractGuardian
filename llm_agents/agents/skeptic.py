@@ -224,6 +224,36 @@ Return ONLY valid JSON in this format:
                 if "reentrancy" in str(finding.get("vulnerability_type", "")).lower():
                     continue
 
+            access_semantic = cls._access_control_source_evidence(finding, function_details or [])
+            if access_semantic["state"] == "vulnerable":
+                item = dict(finding)
+                item.update({"skeptic_confidence": max(0.90, confidence), "confidence_score": max(0.90, confidence),
+                             "validity_reasoning": access_semantic["reasoning"], "skeptic_evidence_lines": access_semantic["evidence"],
+                             "skeptic_status": "VERIFIED", "confirmed": True,
+                             "evidence_source": "source_semantic_verification"})
+                accepted.append(item)
+                continue
+
+            call_semantic = cls._unchecked_call_source_evidence(finding, function_details or [])
+            if call_semantic["state"] == "vulnerable":
+                item = dict(finding)
+                item.update({"skeptic_confidence": max(0.90, confidence), "confidence_score": max(0.90, confidence),
+                             "validity_reasoning": call_semantic["reasoning"], "skeptic_evidence_lines": call_semantic["evidence"],
+                             "skeptic_status": "VERIFIED", "confirmed": True,
+                             "evidence_source": "source_semantic_verification"})
+                accepted.append(item)
+                continue
+
+            vuln_type = str(finding.get("vulnerability_type", "")).lower()
+            if vuln_type in {"business_logic", "no_slippage_limit_check"}:
+                continue
+            if "access" in vuln_type or "unchecked_low_level" in vuln_type:
+                continue
+            if "bad_randomness" in vuln_type and not cls._randomness_source_evidence(finding, function_details or []):
+                continue
+            if "arithmetic" in vuln_type and not cls._arithmetic_source_evidence(finding, function_details or []):
+                continue
+
             if verdict_name == "REJECTED":
                 if cls._has_independent_static_evidence(finding, static_analysis_results):
                     item = dict(finding)
@@ -245,6 +275,179 @@ Return ONLY valid JSON in this format:
             item["confidence_level"] = cls._confidence_level(calibrated, status)
             accepted.append(item)
         return accepted
+
+    @staticmethod
+    def _reentrancy_source_evidence(finding: dict, contract_source: str, function_details: list) -> dict:
+        """Return source-grounded reentrancy evidence for an existing finding."""
+        if "reentrancy" not in str(finding.get("vulnerability_type", "")).lower():
+            return {"state": "not_applicable", "reasoning": "", "evidence": []}
+
+        affected = {
+            str(name).split("(", 1)[0].split(".")[-1]
+            for name in (finding.get("affected_functions", []) or [])
+            if str(name).strip()
+        }
+        matching_details = [
+            detail for detail in (function_details or [])
+            if str(detail.get("function_id", detail.get("function", ""))).split("(", 1)[0].split(".")[-1] in affected
+        ]
+        candidates = matching_details or [{
+            "content": finding.get("code_snippet") or contract_source,
+            "function_id": next(iter(affected), None),
+        }]
+        external_call = re.compile(
+            r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|call\.value\s*\(|send\s*\(|transfer\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()",
+            re.I,
+        )
+        state_write = re.compile(
+            r"\b[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)?\s*(?:\+\+|--|[+\-*/]?=)(?!=)",
+        )
+
+        for detail in candidates:
+            source = str(detail.get("content") or "")
+            call = external_call.search(source)
+            if not call:
+                continue
+            write_after_call = state_write.search(source, call.end())
+            if write_after_call:
+                evidence = [call.group(0).strip(), write_after_call.group(0).strip()]
+                return {
+                    "state": "vulnerable",
+                    "reasoning": (
+                        "Source execution order shows an external interaction before a state update; "
+                        "this violates checks-effects-interactions and supports the reported reentrancy finding."
+                    ),
+                    "evidence": evidence,
+                    "function_id": detail.get("function_id") or detail.get("function"),
+                }
+
+            header = source.split("{", 1)[0]
+            write_before_call = state_write.search(source[:call.start()])
+            if re.search(r"\bnonReentrant\b", header) or write_before_call:
+                evidence = [call.group(0).strip()]
+                if write_before_call:
+                    evidence.insert(0, write_before_call.group(0).strip())
+                return {
+                    "state": "mitigated",
+                    "reasoning": "Source shows a reentrancy guard or state effects before the external interaction.",
+                    "evidence": evidence,
+                    "function_id": detail.get("function_id") or detail.get("function"),
+                }
+
+        return {"state": "insufficient_evidence", "reasoning": "", "evidence": []}
+
+    @staticmethod
+    def _access_control_source_evidence(finding: dict, function_details: list) -> dict:
+        """Confirm the specific caller-controlled entitlement pattern from source."""
+        if "access" not in str(finding.get("vulnerability_type", "")).lower():
+            return {"state": "not_applicable", "reasoning": "", "evidence": []}
+        affected = {
+            str(name).split("(", 1)[0].split(".")[-1]
+            for name in (finding.get("affected_functions", []) or [])
+            if str(name).strip()
+        }
+        for detail in function_details or []:
+            function_id = str(detail.get("function_id", detail.get("function", "")))
+            if function_id.split("(", 1)[0] not in affected:
+                continue
+            source = str(detail.get("content") or "")
+            entitlement = re.search(
+                r"\b(?:reward|credit|entitlement|allowance)\w*\s*\[\s*msg\.sender\s*\]\s*(?:\+=|=)",
+                source,
+                re.I,
+            )
+            protected = re.search(
+                r"\b(?:onlyOwner|onlyRole|hasRole|_checkRole)\b|"
+                r"require\s*\([^;]*(?:msg\.sender\s*==|hasRole)",
+                source,
+                re.I,
+            )
+            owner_write = re.search(r"\b(?:owner|admin)\b\s*=", source, re.I)
+            selfdestruct = re.search(r"\bselfdestruct\s*\(", source, re.I)
+            emergency = re.search(r"\b(?:emergency|sweep|rescue)\w*\s*\(", source, re.I) and re.search(r"address\s*\(\s*this\s*\)\.balance", source, re.I)
+            balance_setter = re.search(r"\b(?:set|update|assign)\w*\s*\([^)]*\baddress\s+\w+", source, re.I) and re.search(r"\b(?:balances?|credits?)\s*\[\s*(?!msg\.sender\b)[^\]]+\]\s*=", source, re.I)
+            if (entitlement or owner_write or selfdestruct or emergency or balance_setter) and not protected:
+                evidence = entitlement or owner_write or selfdestruct or balance_setter or emergency
+                return {
+                    "state": "vulnerable",
+                    "reasoning": "Source shows an externally callable privileged capability without authorization.",
+                    "evidence": [evidence.group(0).strip()],
+                    "function_id": function_id,
+                }
+        return {"state": "insufficient_evidence", "reasoning": "", "evidence": []}
+
+    @staticmethod
+    def _unchecked_call_source_evidence(finding: dict, function_details: list) -> dict:
+        if "unchecked_low_level_calls" not in str(finding.get("vulnerability_type", "")).lower():
+            return {"state": "not_applicable", "reasoning": "", "evidence": []}
+        names = {str(item).split("(", 1)[0].split(".")[-1] for item in (finding.get("affected_functions", []) or [])}
+        for detail in function_details or []:
+            if str(detail.get("function_id", "")).split("(", 1)[0] not in names:
+                continue
+            source = str(detail.get("content") or "")
+            call = re.search(r"\.call\s*(?:\{[^}]*\}\s*)?\(", source, re.I)
+            checked = re.search(r"\(\s*bool\s+(success|ok|sent)\b[^;]*=\s*[^;]*\.call[^;]*;[\s\S]*?(?:require\s*\(\s*\1\b|if\s*\(\s*!\s*\1\b)", source, re.I)
+            if call and not checked:
+                return {"state": "vulnerable", "reasoning": "Source performs a low-level call without checking its return value.", "evidence": [call.group(0).strip()], "function_id": detail.get("function_id")}
+        return {"state": "insufficient_evidence", "reasoning": "", "evidence": []}
+
+    @staticmethod
+    def _randomness_source_evidence(finding: dict, function_details: list) -> bool:
+        names = {str(item).split("(", 1)[0].split(".")[-1] for item in (finding.get("affected_functions", []) or [])}
+        for detail in function_details or []:
+            if str(detail.get("function_id", "")).split("(", 1)[0] not in names:
+                continue
+            source = str(detail.get("content") or "")
+            if re.search(r"block\.(?:timestamp|prevrandao|difficulty|hash)|blockhash\s*\(", source, re.I) and re.search(r"\b(?:random|rand|lottery|raffle|winner)\b|keccak256\s*\(", source, re.I):
+                return True
+        return False
+
+    @staticmethod
+    def _arithmetic_source_evidence(finding: dict, function_details: list) -> bool:
+        names = {str(item).split("(", 1)[0].split(".")[-1] for item in (finding.get("affected_functions", []) or [])}
+        for detail in function_details or []:
+            if str(detail.get("function_id", "")).split("(", 1)[0] not in names:
+                continue
+            source = str(detail.get("content") or "")
+            if re.search(r"[+\-*/]|(?:\+\+|--|[+\-*/]=)", source):
+                return True
+        return False
+
+    @staticmethod
+    def _has_independent_static_evidence(finding: dict, static_analysis_results) -> bool:
+        """Retain a rejected finding only when supplied static output independently supports it."""
+        values = []
+
+        def collect(value):
+            if isinstance(value, str):
+                values.append(value)
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    collect(nested)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    collect(nested)
+
+        collect(static_analysis_results)
+        text = "\n".join(values).lower()
+        if not text:
+            return False
+        category = str(finding.get("vulnerability_type", "")).lower()
+        markers = {
+            "reentrancy": r"\breentrancy\b",
+            "access": r"\b(?:access[ -]?control|suicid(?:al|e)?|selfdestruct)\b",
+            "unchecked": r"\bunchecked\b.*\b(?:call|send|transfer|return)\b",
+            "random": r"\b(?:weak[- ]prng|timestamp|random)\b",
+        }
+        marker = next((pattern for name, pattern in markers.items() if name in category), None)
+        if not marker or not re.search(marker, text, re.I | re.S):
+            return False
+        functions = {
+            str(name).split("(", 1)[0].split(".")[-1].lower()
+            for name in (finding.get("affected_functions", []) or [])
+            if str(name).strip()
+        }
+        return not functions or any(re.search(rf"\b{re.escape(name)}\b", text) for name in functions)
 
     @staticmethod
     def _explicit_disproof(evidence: list, reasoning: str, contract_source: str) -> bool:

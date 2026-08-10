@@ -41,8 +41,8 @@ class AgentCoordinator:
                 self.vuln_retriever = get_vuln_retriever_from_json(
                     json_path=str(PROJECT_ROOT / "known_vulnerabilities" / "contract_vulns.json"),
                     base_dataset_dir=str(PROJECT_ROOT / "known_vulnerabilities"),
-                    persist_directory=str(PROJECT_ROOT / "chroma_db"),
-                    top_k=3,
+                    persist_directory=str(PROJECT_ROOT / "chroma_db_v2"),
+                    top_k=5,
         )       
                 if self.vuln_retriever is None:
                     print_warning("RAG unavailable. Continuing without ChromaDB.")

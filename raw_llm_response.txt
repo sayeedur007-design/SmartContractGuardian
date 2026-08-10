@@ -3,11 +3,11 @@
   "vulnerabilities": [
     {
       "vulnerability_type": "REENTRANCY",
-      "confidence_score": 1.0,
-      "reasoning": "The `withdraw` function makes an external call (`msg.sender.call{value: amount}("")`) followed by state changes (`balances[msg.sender] -= amount`). This pattern allows for a reentrancy attack where the fallback function (not shown) can be triggered, leading to the attacker repeatedly calling `withdraw` and draining the contract's funds.",
-      "affected_functions": ["0x689a8e13743fcf4d2c9e5b2fcb98bc55a8b60550"],
-      "impact": "The attacker can repeatedly call `withdraw` and drain the contract's funds until they no longer have sufficient ETH to make another withdrawal.",
-      "exploitation_scenario": "1. User A calls `deposit()` to send some ETH to the contract.\n2. User B initiates a reentrancy attack by calling `withdraw()` with an amount larger than their balance.\n3. In the `withdraw` function, User B's external call (`msg.sender.call{value: amount}("")`) executes and sends ETH back to User B.\n4. The fallback function is triggered, allowing User B to initiate another `withdraw` call before the state change `balances[msg.sender] -= amount` occurs.\n5. This pattern continues until the contract's ETH balance is depleted."
+      "confidence_score": 0.9,
+      "reasoning": "The contract allows malicious users to initiate a withdrawal and then re-enter the transaction before completing it, withdrawing an additional amount.",
+      "affected_functions": ["withdraw(uint256)"],
+      "impact": "Users can withdraw more than intended, potentially leading to loss of funds.",
+      "exploitation_scenario": "User initiates 'emergencyWithdraw' call. Before the transfer completes, the user re-enters 'withdraw' and calls 'emergencyWithdraw' again, withdrawing more tokens than intended."
     }
   ]
 }

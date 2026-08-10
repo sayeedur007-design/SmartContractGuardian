@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 class AnalyzerAgent:
+    RAG_FINAL_K = 5
+    RAG_CANDIDATE_K = 20
     def __init__(self, retriever, model_config=None):
         from ..config import ModelConfig
 
@@ -61,11 +63,11 @@ class AnalyzerAgent:
             )
             with create_progress_spinner("Analyzing contract vulnerabilities") as progress:
                 task = progress.add_task("Searching for vulnerability patterns...")
-                query_text = self._build_query_text(contract_info)
+                retrieval_queries = self._build_retrieval_queries(contract_info)
                 
                 # Check if retriever is enabled
                 if self.retriever:
-                    relevant_docs = self.retriever.invoke(query_text)
+                    relevant_docs = self._retrieve_security_context(retrieval_queries)
                     logger.info("Analyzer RAG results: %d", len(relevant_docs))
                     progress.update(task, description=f"Found {len(relevant_docs)} relevant patterns")
                 else:
@@ -152,12 +154,194 @@ class AnalyzerAgent:
         except (TypeError, ValueError):
             return 0.0
 
-    def _build_query_text(self, contract_info: Dict) -> str:
-        """Small summary of the user’s contract to retrieve related vulnerabilities."""
-        lines = []
-        for fn in contract_info.get("function_details", []):
-            lines.append(f"Function {fn['function_id']} calls {fn['called_functions']}")
-        return "\n".join(lines)
+    @staticmethod
+    def _detector_evidence(detector_results) -> List[str]:
+        """Collect existing static-analysis text without assigning new categories."""
+        evidence = []
+
+        def visit(item):
+            if isinstance(item, dict):
+                for key in ("check", "detector", "name", "description", "impact"):
+                    value = item.get(key)
+                    if isinstance(value, str) and value.strip():
+                        evidence.append(value.strip())
+                for value in item.values():
+                    visit(value)
+            elif isinstance(item, list):
+                for value in item:
+                    visit(value)
+
+        visit(detector_results)
+        return list(dict.fromkeys(evidence))[:8]
+
+    @staticmethod
+    def _security_signals(function_source: str) -> List[str]:
+        """Describe observed source features for retrieval, never as findings."""
+        source = function_source or ""
+        signals = []
+        external_calls = list(re.finditer(r"\.(?:call(?:\.value)?|delegatecall|send|transfer)\s*(?:\{|\(|\.value)", source, re.I))
+        if external_calls:
+            signals.append("external call or value transfer")
+        if re.search(r"\.call(?:\.value)?\s*(?:\{|\()", source, re.I):
+            signals.append("low-level call")
+        if re.search(r"\.delegatecall\s*(?:\{|\()", source, re.I):
+            signals.append("delegatecall")
+        if re.search(r"\bmsg\.sender\b", source):
+            signals.append("msg.sender interaction")
+        if re.search(r"\b(?:balances?|credits?|balanceOf)\s*\[", source, re.I):
+            signals.append("balance or mapping state access")
+        if external_calls and re.search(r"(?:\[[^\]]+\]|\b(?:balance|credit|owner|admin|total)\w*)\s*(?:\+\+|--|[+\-*/]?=)", source[external_calls[0].end():], re.I):
+            signals.append("state update after external interaction")
+            signals.append("external call before state update")
+            signals.append("checks-effects-interactions ordering evidence")
+        if re.search(r"\b(?:onlyOwner|onlyRole|hasRole|owner|admin|authorize[dr]?|msg\.sender\s*==)", source, re.I):
+            signals.append("authorization or privileged-state evidence")
+        if re.search(r"\bselfdestruct\s*\(", source, re.I):
+            signals.append("selfdestruct operation")
+        if re.search(r"\bblock\.(?:timestamp|number|prevrandao|difficulty|hash)\b|\bblockhash\s*\(", source, re.I):
+            signals.append("block-derived value")
+        if re.search(r"\b(?:random|rand|lottery|raffle)\b", source, re.I):
+            signals.append("randomness-related logic")
+        if re.search(r"\b(?:for|while|do)\b", source):
+            signals.append("loop")
+        if re.search(r"\bunchecked\b|(?:\+|-|\*|/)\s*=|\b\w+\s*[+\-*/]\s*\w+", source):
+            signals.append("arithmetic operation")
+        return signals
+
+    @staticmethod
+    def _state_references(function_source: str) -> List[str]:
+        """Return concrete source expressions likely to carry contract state."""
+        references = re.findall(r"\b[A-Za-z_]\w*\s*\[[^\]\n]+\]", function_source or "")
+        references.extend(re.findall(r"\b(?:owner|admin|administrator|controller|operator|totalSupply|totalBalance)\b", function_source or "", re.I))
+        return list(dict.fromkeys(reference.strip() for reference in references))[:8]
+
+    @classmethod
+    def _retrieval_category_hints(cls, function_source: str) -> List[str]:
+        """Map concrete source evidence to retrieval-only corpus categories.
+
+        These hints only rank already-retrieved documents.  They do not create
+        analyzer findings or change the vulnerability decision pipeline.
+        """
+        source = function_source or ""
+        signals = set(cls._security_signals(source))
+        hints = []
+        if {"low-level call", "state update after external interaction"}.issubset(signals):
+            hints.append("reentrancy")
+        if {"block-derived value", "randomness-related logic"}.issubset(signals):
+            hints.append("bad_randomness")
+        if "low-level call" in signals and not re.search(
+            r"\b(?:success|ok|sent)\b|require\s*\([^;]*(?:call|send|delegatecall)", source, re.I
+        ):
+            hints.append("unchecked_low_level_calls")
+        protected = re.search(
+            r"\b(?:onlyOwner|onlyRole|hasRole)\b|require\s*\([^;]*(?:msg\.sender\s*==|hasRole)", source, re.I
+        )
+        privileged_action = re.search(
+            r"\bselfdestruct\s*\(|\b(?:owner|admin)\s*=|"
+            r"\b(?:balance|reward)\s*\[\s*(?!msg\.sender\b)[^\]]+\]\s*=|"
+            r"address\s*\(\s*this\s*\)\.balance|\breward\s*\[\s*msg\.sender\s*\]\s*\+=",
+            source,
+            re.I,
+        )
+        if privileged_action and not protected:
+            hints.append("access_control")
+        if "loop" in signals:
+            hints.append("denial_of_service")
+        return hints
+
+    def _build_query_text(self, contract_info: Dict, function_detail: Dict = None) -> str:
+        """Build one source-grounded, structured security retrieval query."""
+        detail = function_detail or {}
+        source_code = contract_info.get("source_code", "") or ""
+        contract_name = detail.get("contract") or contract_info.get("target_contract", {}).get("name") or contract_info.get("target_contract", {}).get("filename") or "<unknown>"
+        pragma_match = re.search(r"\bpragma\s+solidity\s+([^;]+);", source_code)
+        pragma = pragma_match.group(1).strip() if pragma_match else "<unknown>"
+        function_source = detail.get("content") or ""
+        function_id = detail.get("function_id") or detail.get("function") or "<contract context>"
+        signals = self._security_signals(function_source)
+        retrieval_hints = self._retrieval_category_hints(function_source)
+        state_references = self._state_references(function_source)
+        known_categories = contract_info.get("static_vulnerability_categories", []) or []
+        detector_evidence = self._detector_evidence(contract_info.get("detector_results", []))
+        sections = [
+            f"Contract: {contract_name}", f"Pragma: {pragma}", "", "Function:", function_id,
+            f"Visibility: {detail.get('visibility', '<unknown>')}",
+            f"Modifiers: {', '.join(detail.get('modifiers') or []) or 'none'}",
+            f"Calls: {', '.join(detail.get('called_functions') or []) or 'none'}",
+            f"State references: {', '.join(state_references) or 'none identified'}",
+            f"Security evidence: {', '.join(signals) or 'none identified'}",
+            f"Retrieval security categories: {', '.join(retrieval_hints) or 'none inferred'}",
+        ]
+        if known_categories:
+            sections.append(f"Known analyzer categories: {', '.join(map(str, known_categories))}")
+        if detector_evidence:
+            sections.append(f"Static-analysis findings: {' | '.join(detector_evidence)}")
+        if function_source:
+            sections.extend(("Function source:", function_source[:2400]))
+        return "\n".join(sections)
+
+    def _build_retrieval_queries(self, contract_info: Dict) -> List[str]:
+        """Query every externally callable function with observed security evidence."""
+        details = contract_info.get("function_details", []) or []
+        selected = []
+        for index, detail in enumerate(details):
+            signals = self._security_signals(detail.get("content") or "")
+            if signals and detail.get("visibility") in {"public", "external"}:
+                selected.append((index, detail))
+        if not selected:
+            selected = [
+                (index, detail)
+                for index, detail in enumerate(details)
+                if detail.get("content") or detail.get("function_id")
+            ]
+        return [self._build_query_text(contract_info, detail) for _, detail in selected] or [self._build_query_text(contract_info)]
+
+    @staticmethod
+    def _query_category_hints(query: str) -> set:
+        match = re.search(r"^Retrieval security categories:\s*(.+)$", query, re.MULTILINE)
+        if not match or match.group(1).strip() == "none inferred":
+            return set()
+        return {item.strip() for item in match.group(1).split(",") if item.strip()}
+
+    def _rank_retrieval_candidate(self, query: str, document: Document, distance: float) -> float:
+        """Rank vector candidates with observed-query/category evidence only."""
+        metadata = document.metadata or {}
+        labels = {item.strip() for item in str(metadata.get("vuln_categories", "")).split(",") if item.strip()}
+        hints = self._query_category_hints(query)
+        # Chroma's L2 score is lower-is-better.  Category agreement is a
+        # ranking feature, not a new finding about the analyzed contract.
+        score = -float(distance)
+        if hints:
+            if labels & hints:
+                score += 3.0
+            elif labels:
+                score -= 0.75
+            else:
+                score -= 1.25
+        elif not labels:
+            score -= 0.35
+        if metadata.get("vuln_lines"):
+            score += 0.15
+        return score
+
+    def _retrieve_security_context(self, queries: List[str]) -> List[Document]:
+        """Fetch vector candidates, rank security evidence, then keep five docs."""
+        ranked = []
+        seen = set()
+        vectorstore = getattr(self.retriever, "vectorstore", None)
+        for query in queries:
+            if vectorstore and hasattr(vectorstore, "similarity_search_with_score"):
+                candidates = vectorstore.similarity_search_with_score(query, k=self.RAG_CANDIDATE_K)
+            else:
+                candidates = [(document, 0.0) for document in self.retriever.invoke(query)]
+            for document, distance in candidates:
+                metadata = document.metadata or {}
+                identity = (metadata.get("filename"), metadata.get("source"), metadata.get("start_line"), metadata.get("end_line"), document.page_content)
+                if identity not in seen:
+                    seen.add(identity)
+                    ranked.append((self._rank_retrieval_candidate(query, document, distance), document))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [document for _, document in ranked[:self.RAG_FINAL_K]]
 
     @staticmethod
     def _add_deterministic_findings(vulnerabilities: list, contract_info: Dict) -> list:
@@ -182,7 +366,10 @@ class AnalyzerAgent:
             ))
 
         def public_or_external(detail):
-            return str(detail.get("visibility", "")).lower() in {"public", "external"}
+            return (
+                str(detail.get("function", "")).lower() != "constructor"
+                and str(detail.get("visibility", "")).lower() in {"public", "external"}
+            )
 
         def privileged_write(detail):
             body = detail.get("content", "") or ""
@@ -197,15 +384,14 @@ class AnalyzerAgent:
             ("access_control", 0.90, "High", "Restrict the privileged operation with an authorization check.",
              lambda detail: public_or_external(detail) and privileged_write(detail) and not protected(detail),
              "An externally callable function changes privileged state without an authorization check."),
-            ("dangerous_selfdestruct", 0.95, "High", "Remove selfdestruct or strictly protect it with authorization.",
-             lambda detail: public_or_external(detail) and re.search(r"\bselfdestruct\s*\(", detail.get("content", "") or "", re.I) and not protected(detail),
-             "An externally callable function reaches selfdestruct without an authorization check."),
         ]
         for vuln_type, confidence, severity, remediation, predicate, evidence in direct_rules:
-            if vuln_type in existing:
-                continue
             affected = [detail["function_id"] for detail in details if predicate(detail)]
-            if affected:
+            if affected and not any(
+                str(item.get("vulnerability_type", "")).lower() == vuln_type
+                and set(item.get("affected_functions", []) or []) == set(affected)
+                for item in findings
+            ):
                 findings.append({
                     "vulnerability_type": vuln_type, "confidence_score": confidence,
                     "reasoning": f"Deterministic source evidence: {evidence}",
@@ -215,41 +401,143 @@ class AnalyzerAgent:
                 })
                 existing.add(vuln_type)
 
+        def add_access_control_finding(affected, confidence, reasoning, remediation, operation=None):
+            """Add source-confirmed access-control evidence without collapsing other functions."""
+            affected = list(dict.fromkeys(affected))
+            if not affected or any(
+                str(item.get("vulnerability_type", "")).lower() == "access_control"
+                and set(item.get("affected_functions", []) or []) == set(affected)
+                for item in findings
+            ):
+                return
+            item = {
+                "vulnerability_type": "access_control", "confidence_score": confidence,
+                "reasoning": f"Deterministic source evidence: {reasoning}",
+                "affected_functions": affected, "impact": "High", "severity": "High",
+                "remediation": remediation,
+                "exploitation_scenario": "Any account can invoke the affected externally callable function.",
+            }
+            if operation:
+                item["security_operation"] = operation
+            findings.append(item)
+
+        unprotected_selfdestruct = [
+            detail["function_id"] for detail in details
+            if public_or_external(detail)
+            and re.search(r"\bselfdestruct\s*\(", detail.get("content", "") or "", re.I)
+            and not protected(detail)
+        ]
+        add_access_control_finding(
+            unprotected_selfdestruct, 0.95,
+            "An externally callable function reaches selfdestruct without an authorization check.",
+            "Remove selfdestruct or strictly protect it with authorization.",
+            operation="selfdestruct",
+        )
+
+        caller_entitlement_write = [
+            detail["function_id"] for detail in details
+            if public_or_external(detail) and not protected(detail)
+            and re.search(r"\b(?:add|grant|allocate|credit|mint)\w*\s*\([^)]*\b(?:uint|int)\d*\s+\w+", detail.get("content", ""), re.I)
+            and re.search(r"\b(?:reward|credit|entitlement|allowance)\w*\s*\[\s*msg\.sender\s*\]\s*(?:\+=|=)", detail.get("content", ""), re.I)
+        ]
+        add_access_control_finding(
+            caller_entitlement_write, 0.90,
+            "An externally callable entitlement-allocation function increases caller-controlled reward or credit state without authorization.",
+            "Restrict entitlement allocation to an authorized role or validate the allocation against an approved source.",
+        )
+
+        unrestricted_emergency_withdrawal = [
+            detail["function_id"] for detail in details
+            if public_or_external(detail) and not protected(detail)
+            and re.search(r"\b(?:emergency|sweep|rescue)\w*\s*\(", detail.get("content", ""), re.I)
+            and re.search(r"(?:payable\s*\(\s*msg\.sender\s*\)|msg\.sender)\s*\.\s*(?:transfer|send|call)\s*(?:\{[^}]*\})?\s*\(\s*address\s*\(\s*this\s*\)\.balance", detail.get("content", ""), re.I)
+        ]
+        add_access_control_finding(
+            unrestricted_emergency_withdrawal, 0.95,
+            "An externally callable emergency-style function transfers the contract's full balance without authorization.",
+            "Restrict emergency withdrawal of contract-held funds to an authorized role.",
+        )
+
+        arbitrary_balance_write = [
+            detail["function_id"] for detail in details
+            if public_or_external(detail) and not protected(detail)
+            and re.search(r"\b(?:set|update|assign)\w*\s*\([^)]*\baddress\s+\w+[^)]*\b(?:u?int)\d*\s+\w+", detail.get("content", ""), re.I)
+            and re.search(r"\b(?:balances?|credits?)\s*\[\s*(?!msg\.sender\b)[^\]]+\]\s*=", detail.get("content", ""), re.I)
+        ]
+        add_access_control_finding(
+            arbitrary_balance_write, 0.90,
+            "An externally callable administrative setter assigns another user's financial balance without authorization.",
+            "Restrict balance administration to an authorized role and validate the update authority.",
+        )
+
+        unchecked_calls = []
+        for detail in details:
+            source = detail.get("content", "") or ""
+            low_level_call = re.search(r"\.call\s*(?:\{[^}]*\}\s*)?\(", source, re.I)
+            checked_call = re.search(
+                r"\(\s*bool\s+(success|ok|sent)\b[^;]*=\s*[^;]*\.call\s*(?:\{[^}]*\}\s*)?\([^;]*;"
+                r"[\s\S]*?(?:require\s*\(\s*\1\b|if\s*\(\s*!\s*\1\b)",
+                source,
+                re.I,
+            )
+            if public_or_external(detail) and low_level_call and not checked_call:
+                unchecked_calls.append(detail["function_id"])
+        if unchecked_calls and not any(
+            str(item.get("vulnerability_type", "")).lower() == "unchecked_low_level_calls"
+            and set(item.get("affected_functions", []) or []) == set(unchecked_calls)
+            for item in findings
+        ):
+            findings.append({
+                "vulnerability_type": "unchecked_low_level_calls", "confidence_score": 0.90,
+                "reasoning": "Deterministic source evidence: A low-level call return value is not checked in the affected function.",
+                "affected_functions": unchecked_calls, "impact": "High", "severity": "High",
+                "remediation": "Check the low-level call result and revert or handle failure explicitly.",
+                "exploitation_scenario": "A failed external call can be ignored while execution continues.",
+            })
+
         # Slither is an independent signal.  Preserve its high-signal suicidal
         # result even when a model returns an empty list; direct source checks
         # above remain the authority for the affected function and remediation.
         static_descriptions = AnalyzerAgent._detector_descriptions(contract_info.get("detector_results", []))
         logger.info("Analyzer static-analysis findings: %s", static_descriptions)
-        if "dangerous_selfdestruct" not in existing and any(
+        if not unprotected_selfdestruct and any(
             re.search(r"\b(?:suicid(?:al|e)?|selfdestruct|destruct)\b", description, re.I)
             for description in static_descriptions
         ):
             affected = [detail["function_id"] for detail in details if re.search(r"\bselfdestruct\s*\(", detail.get("content", ""), re.I)]
             if affected:
                 findings.append({
-                    "vulnerability_type": "dangerous_selfdestruct", "confidence_score": 0.90,
+                    "vulnerability_type": "access_control", "confidence_score": 0.90,
                     "reasoning": "Static-analysis evidence: Slither reported an unrestricted destruction path. " + static_descriptions[0],
                     "affected_functions": affected, "impact": "High", "severity": "High",
                     "remediation": "Remove selfdestruct or strictly protect it with authorization.",
                     "exploitation_scenario": "Any account can invoke the reported destruction path.",
+                    "security_operation": "selfdestruct",
                 })
-                existing.add("dangerous_selfdestruct")
+                existing.add("access_control")
 
         rules = [
             ("reentrancy", 0.95, "High", "Apply checks-effects-interactions and a reentrancy guard.",
              lambda text: re.search(r"\.call\s*\{[^}]*value\s*:", text, re.I) and re.search(r"\.call[\s\S]*?(?:balances|\w+)\s*\[?[^;]*[-+]?=", text, re.I)),
+            ("bad_randomness", 0.80, "High", "Use a verifiable randomness source instead of miner-influenced block values.",
+             lambda text: re.search(r"block\.timestamp", text)
+             and re.search(r"\b(?:random|rand|lottery|raffle|winner)\b|keccak256\s*\(|block\.(?:prevrandao|difficulty|hash)\b|blockhash\s*\(", text, re.I)),
             ("timestamp_dependence", 0.65, "Medium", "Avoid using miner-influenced time in security-sensitive decisions.",
-             lambda text: re.search(r"block\.timestamp", text) and re.search(r"(?:require|if|keccak|random|winner|payout|transfer|call|=)\s*[\s\S]{0,120}block\.timestamp|block\.timestamp[\s\S]{0,120}(?:require|if|keccak|random|winner|payout|transfer|call|=)", text, re.I)),
+             lambda text: re.search(r"block\.timestamp", text)
+             and not re.search(r"\b(?:random|rand|lottery|raffle|winner)\b|keccak256\s*\(|block\.(?:prevrandao|difficulty|hash)\b|blockhash\s*\(", text, re.I)
+             and re.search(r"(?:require|if|payout|transfer|call|=)\s*[\s\S]{0,120}block\.timestamp|block\.timestamp[\s\S]{0,120}(?:require|if|payout|transfer|call|=)", text, re.I)),
             ("integer_overflow", 0.75, "Medium", "Remove unchecked arithmetic or validate bounds before state updates.",
              lambda text: re.search(r"unchecked\s*\{[\s\S]*?(?:\+\+|--|\+=|-=|\*=)", text, re.I)),
             ("denial_of_service", 0.70, "Medium", "Use pull payments or bounded batches for recipient processing.",
              lambda text: re.search(r"for\s*\([^)]*;[^)]*\.length[\s\S]*?\.(?:transfer|send|call)\s*\(", text, re.I)),
         ]
         for vuln_type, confidence, severity, remediation, predicate in rules:
-            if vuln_type in existing:
-                continue
             affected = [detail["function_id"] for detail in details if predicate(detail.get("content") or "")]
-            if not affected:
+            if not affected or any(
+                str(item.get("vulnerability_type", "")).lower() == vuln_type
+                and set(item.get("affected_functions", []) or []) == set(affected)
+                for item in findings
+            ):
                 continue
             findings.append({
                 "vulnerability_type": vuln_type, "confidence_score": confidence,
@@ -327,6 +615,17 @@ class AnalyzerAgent:
             return None
 
         details = function_details or []
+
+        # Function summaries supplied to the LLM include visibility and call
+        # metadata.  Recover the canonical Solidity ID from that presentation
+        # form before treating it as an unresolved external reference.
+        described_function = re.search(r"\bfunction\s+([A-Za-z_]\w*)\s*\(", candidate, re.I)
+        if described_function:
+            name = described_function.group(1)
+            matches = [function_id for function_id in allowed if function_id.split("(", 1)[0] == name]
+            if len(matches) == 1:
+                logger.info("Mapped function summary %r to %s", value, matches[0])
+                return matches[0]
 
         # Models commonly cite static-analysis locations (for example,
         # ``OwnershipBug.sol#11``).  Resolve those against Slither's source
@@ -429,7 +728,7 @@ class AnalyzerAgent:
         matches = [function_id for function_id in allowed if function_id.split("(", 1)[0] == name]
         # Signature-less references (including ``withdraw()``) are only safe
         # when the contract has a single overload with that name.
-        if len(matches) == 1 and ("(" not in normalized or normalized.endswith("()")):
+        if len(matches) == 1:
             logger.info("Mapped affected-function reference %r by name to %s", value, matches[0])
             return matches[0]
         logger.info("Unable to map affected-function reference %r", value)
@@ -465,18 +764,36 @@ class AnalyzerAgent:
             )
             item = dict(finding)
             if affected:
+                if "reentrancy" in str(item.get("vulnerability_type", "")).lower():
+                    reentrant = []
+                    for function_id in affected:
+                        detail = next((detail for detail in details if detail.get("function_id") == function_id), {})
+                        source = detail.get("content", "") or ""
+                        call = re.search(r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|call\.value\s*\(|send\s*\(|transfer\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()", source, re.I)
+                        state_after_call = call and re.search(
+                            r"\b[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)?\s*(?:\+\+|--|[+\-*/]?=)(?!=)",
+                            source[call.end():],
+                        )
+                        if state_after_call:
+                            reentrant.append(function_id)
+                    if not reentrant:
+                        # A source-confirmed deterministic finding for the real
+                        # function is added separately; never retain a valid but
+                        # unrelated function as a reentrancy location.
+                        continue
+                    affected = reentrant
                 # Use canonical IDs downstream so snippets, reviewer prompts,
                 # and generation all refer to the actual Solidity function.
                 item["affected_functions"] = affected
             else:
-                # Hashes, addresses, and opaque IDs cannot always be mapped
-                # back to a source declaration. Preserve them for the
-                # generator rather than degrading useful evidence to [].
+                # Do not allow example-derived or fabricated identifiers into
+                # final findings.  A finding with no real source function is
+                # discarded; deterministic source evidence remains separate.
                 logger.warning(
-                    "Keeping finding %r with unresolved affected functions %r",
+                    "Discarding finding %r with unresolved affected functions %r",
                     finding.get("vulnerability_type"), finding.get("affected_functions"),
                 )
-                item["affected_functions"] = list(finding.get("affected_functions") or [])
+                continue
             validated.append(item)
         return validated
 
