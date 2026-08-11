@@ -162,7 +162,7 @@ class GeneratorAgent:
             "validation_errors": failures,
         }
 
-    def generate_secure_contract(self, source_code: str, vulnerabilities: List[Dict]) -> str:
+    def generate_secure_contract(self, source_code: str, vulnerabilities: List[Dict], progress_callback=None) -> str:
         """Rewrite and security-validate a contract using the configured model."""
         findings = json.dumps(vulnerabilities, indent=2, default=str)
         prompt = f"""You are the final secure-contract generation stage of a Solidity security pipeline.
@@ -186,8 +186,12 @@ CONTRACT SOURCE:
 {source_code}
 
 Return only the complete Solidity source code. Do not include markdown or an explanation."""
+        if progress_callback:
+            progress_callback("secure_generation", "Generating secure Solidity", "The local model is rewriting vulnerable logic while preserving the contract interface.")
         raw_response = self._chat(prompt)
         generated = self._normalize_generated_solidity(self._clean_solidity(raw_response))
+        if progress_callback:
+            progress_callback("generated_validation", "Validating generated code", "Checking the generated Solidity for security regressions and interface changes.")
         report = self._security_validation_report(generated, vulnerabilities, source_code)
         quality = self._generation_quality_report(source_code, generated)
         failures = report["blocking"] + quality["blocking"]
@@ -211,7 +215,11 @@ PREVIOUS GENERATED CONTRACT:
 SECURITY OR GENERATION-QUALITY FAILURES TO FIX:
 {chr(10).join(f'- {failure}' for failure in failures)}
 """
+        if progress_callback:
+            progress_callback("repairing_contract", "Repairing generated contract", "The first draft needs a corrective pass before it can be accepted.")
         repaired = self._normalize_generated_solidity(self._clean_solidity(self._chat(repair_prompt)))
+        if progress_callback:
+            progress_callback("generated_validation", "Revalidating generated code", "Verifying the corrected Solidity contract before compiler validation.")
         final_report = self._security_validation_report(repaired, vulnerabilities, source_code)
         final_quality = self._generation_quality_report(source_code, repaired)
         remaining = final_report["blocking"] + final_quality["blocking"]

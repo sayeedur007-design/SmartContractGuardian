@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, send_file, send_from_directory
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import os
@@ -157,6 +157,111 @@ def _compile_secure_contract(contract_path):
     return 'Passed', ''
 
 
+def _secure_generation_event(generation_id, stage, status, message, detail=""):
+    """Publish a generation update only to the browser subscribed to this job."""
+    job = jobs.get(generation_id)
+    if job and status == 'complete' and stage != 'complete':
+        completed_stages = job.setdefault('completed_stages', [])
+        if stage not in completed_stages:
+            completed_stages.append(stage)
+    payload = {
+        'generation_id': generation_id,
+        'stage': stage,
+        'status': status,
+        'message': message,
+        'detail': detail,
+        'completed_stages': (job or {}).get('completed_stages', []),
+    }
+    if job:
+        job['last_progress_event'] = payload
+    socketio.emit('secure_generation_progress', payload, to=generation_id)
+
+
+def _run_secure_generation(generation_id):
+    job = jobs[generation_id]
+    filename = job['filename']
+    temporary_path = job['temporary_path']
+    try:
+        _secure_generation_event(generation_id, 'static_analysis', 'active', 'Running static security analysis', 'Slither is loading the Solidity contract and extracting security-relevant structure.')
+        function_details, call_graph, detector_results = analyze_contract(temporary_path)
+        _secure_generation_event(generation_id, 'static_analysis', 'complete', 'Static security analysis complete', 'Contract structure and detector results are ready for the security pipeline.')
+        with open(temporary_path, 'r', encoding='utf-8') as source_file:
+            source_code = source_file.read()
+
+        contract_info = {
+            'function_details': function_details,
+            'call_graph': call_graph,
+            'source_code': source_code,
+            'detector_results': detector_results,
+            'target_contract': {'path': filename},
+            'contracts_dir': temporary_path,
+        }
+        _secure_generation_event(generation_id, 'security_context', 'active', 'Building security context', 'Examining contract relationships and preparing context for the local security agents.')
+        is_ready, err_msg = validate_ollama_setup(['qwen2.5-coder:7b', 'nomic-embed-text:latest'])
+        if not is_ready:
+            raise RuntimeError(err_msg)
+
+        model_config = ModelConfig(context_model='ollama', analyzer_model='ollama', skeptic_model='ollama', exploiter_model='ollama', generator_model='ollama', skip_poc_generation=True)
+
+        def coordinator_progress(stage, status, message, detail):
+            _secure_generation_event(generation_id, stage, status, message, detail)
+
+        coordinator = SocketIOAgentCoordinator(generation_id, model_config=model_config, use_rag=True, progress_callback=coordinator_progress)
+        analysis_results = coordinator.analyze_contract(contract_info, auto_run_config={'auto_run': False, 'max_retries': 0})
+        vulnerabilities = analysis_results.get('rechecked_vulnerabilities', [])
+
+        def generator_progress(stage, message, detail):
+            _secure_generation_event(generation_id, stage, 'active', message, detail)
+
+        generated_source = _clean_generated_solidity(coordinator.generator.generate_secure_contract(source_code, vulnerabilities, progress_callback=generator_progress))
+        _secure_generation_event(generation_id, 'generated_validation', 'complete', 'Generated code validation passed', 'The generated contract passed deterministic security and quality checks.')
+
+        output_filename = f'{generation_id}_secure_{filename}'
+        output_path = os.path.join(SECURE_CONTRACT_FOLDER, output_filename)
+        _secure_generation_event(generation_id, 'compiler_validation', 'active', 'Compiling generated contract', 'Verifying Solidity syntax and compiler compatibility.')
+        with open(output_path, 'w', encoding='utf-8', newline='\n') as output_file:
+            output_file.write(generated_source)
+        compile_status, compile_error = _compile_secure_contract(output_path)
+        if compile_status == 'Failed':
+            os.remove(output_path)
+            raise ValueError(f'Generated contract did not compile: {compile_error}')
+        _secure_generation_event(generation_id, 'compiler_validation', 'complete', 'Compilation passed', 'The generated Solidity contract compiled successfully.')
+
+        _secure_generation_event(generation_id, 'security_validation', 'active', 'Running final security validation', 'Slither is validating the generated contract, not only the uploaded source.')
+        try:
+            analyze_contract(output_path)
+        except Exception as validation_error:
+            os.remove(output_path)
+            raise ValueError(f'Generated contract failed Slither validation: {validation_error}') from validation_error
+        _secure_generation_event(generation_id, 'security_validation', 'complete', 'Security validation passed', 'Final static security validation completed successfully.')
+        _secure_generation_event(generation_id, 'finalizing_output', 'active', 'Finalizing secure output', 'Preparing the validated secure contract for download.')
+
+        result = {
+            'success': True, 'generated_code': generated_source,
+            'security_summary': f'Generated and validated a secure contract after analyzing {len(vulnerabilities)} confirmed vulnerability finding(s).',
+            'vulnerabilities_detected': len(vulnerabilities), 'validation_status': 'Passed',
+            'compile_status': compile_status, 'download_url': f'/api/secure-contracts/{generation_id}/download',
+        }
+        jobs[generation_id].update({'status': 'completed', 'result': result})
+        _secure_generation_event(generation_id, 'complete', 'complete', 'Secure contract ready', 'The secure revision passed compilation and final security validation.')
+    except subprocess.TimeoutExpired:
+        jobs[generation_id].update({'status': 'error', 'error': 'Secure contract compilation timed out.'})
+        _secure_generation_event(generation_id, 'compiler_validation', 'failed', 'Generation failed', 'Compilation timed out before the secure contract could be validated.')
+    except Exception as error:
+        app.logger.exception('Secure contract generation failed for %s', filename)
+        detail = str(error).strip() or error.__class__.__name__
+        if 'connection error' in detail.lower() or 'connection refused' in detail.lower():
+            detail = 'Local Ollama is unavailable. Start Ollama and ensure qwen2.5-coder:7b is installed.'
+        jobs[generation_id].update({'status': 'error', 'error': f'Unable to generate a secure contract: {detail}'})
+        _secure_generation_event(generation_id, 'error', 'failed', 'Generation failed', jobs[generation_id]['error'])
+    finally:
+        try:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+        except OSError as cleanup_error:
+            app.logger.warning('Could not remove temporary secure-generation upload %s: %s', temporary_path, cleanup_error)
+
+
 @app.route('/api/generate-secure-contract', methods=['POST'])
 def generate_secure_contract():
     if 'file' not in request.files:
@@ -170,103 +275,36 @@ def generate_secure_contract():
     if not filename.lower().endswith('.sol'):
         return jsonify({'error': 'Please upload a Solidity (.sol) file.'}), 400
 
-    generation_id = str(uuid.uuid4())
+    generation_id = request.form.get('generation_id') or str(uuid.uuid4())
+    if not re.fullmatch(r'[A-Za-z0-9-]{8,64}', generation_id):
+        return jsonify({'error': 'Invalid generation ID.'}), 400
+    if generation_id in jobs:
+        return jsonify({'error': 'Generation ID is already in use.'}), 409
     temporary_path = os.path.join(UPLOAD_FOLDER, f'{generation_id}_{filename}')
     uploaded_file.save(temporary_path)
     app.logger.info('Secure contract generation upload received: %s', uploaded_filename)
+    jobs[generation_id] = {'status': 'generating', 'filename': filename, 'temporary_path': temporary_path, 'type': 'secure_generation'}
+    _secure_generation_event(generation_id, 'contract_received', 'complete', 'Contract received', f'{filename} is ready for the local AI security pipeline.')
+    socketio.start_background_task(_run_secure_generation, generation_id)
+    return jsonify({'generation_id': generation_id, 'status': 'generating', 'message': 'Secure contract generation started'}), 202
 
-    try:
-        # Match the analyzer's contract-loading flow: Slither produces the
-        # function, call graph, and detector data consumed by the coordinator.
-        function_details, call_graph, detector_results = analyze_contract(temporary_path)
-        with open(temporary_path, 'r', encoding='utf-8') as source_file:
-            source_code = source_file.read()
 
-        contract_info = {
-            'function_details': function_details,
-            'call_graph': call_graph,
-            'source_code': source_code,
-            'detector_results': detector_results,
-            'target_contract': {'path': filename},
-            # A single upload is the same isolated project-context input used
-            # by the analyzer for a standalone contract.
-            'contracts_dir': temporary_path,
-        }
-        # Validate local Ollama setup and required models before starting generation
-        is_ready, err_msg = validate_ollama_setup(["qwen2.5-coder:7b", "nomic-embed-text:latest"])
-        if not is_ready:
-            raise RuntimeError(err_msg)
+@app.route('/api/secure-generations/<generation_id>', methods=['GET'])
+def get_secure_generation(generation_id):
+    job = jobs.get(generation_id)
+    if not job or job.get('type') != 'secure_generation':
+        return jsonify({'error': 'Secure generation job not found.'}), 404
+    return jsonify({'generation_id': generation_id, 'status': job['status'], 'result': job.get('result'), 'error': job.get('error')})
 
-        model_config = ModelConfig(
-            context_model='ollama',
-            analyzer_model='ollama',
-            skeptic_model='ollama',
-            exploiter_model='ollama',
-            generator_model='ollama',
-            skip_poc_generation=True,
-        )
-        coordinator = SocketIOAgentCoordinator(
-            generation_id,
-            model_config=model_config,
-            use_rag=True,
-        )
-        analysis_results = coordinator.analyze_contract(
-            contract_info,
-            auto_run_config={'auto_run': False, 'max_retries': 0},
-        )
-        vulnerabilities = analysis_results.get('rechecked_vulnerabilities', [])
-        generated_source = _clean_generated_solidity(
-            coordinator.generator.generate_secure_contract(source_code, vulnerabilities)
-        )
 
-        output_filename = f'{generation_id}_secure_{filename}'
-        output_path = os.path.join(SECURE_CONTRACT_FOLDER, output_filename)
-        with open(output_path, 'w', encoding='utf-8', newline='\n') as output_file:
-            output_file.write(generated_source)
-
-        compile_status, compile_error = _compile_secure_contract(output_path)
-        if compile_status == 'Failed':
-            os.remove(output_path)
-            raise ValueError(f'Generated contract did not compile: {compile_error}')
-
-        # Slither validation is performed on the generated source, not merely
-        # the uploaded input. A failed parse or validation prevents download.
-        try:
-            analyze_contract(output_path)
-        except Exception as validation_error:
-            os.remove(output_path)
-            raise ValueError(f'Generated contract failed Slither validation: {validation_error}') from validation_error
-
-        vulnerabilities_detected = len(vulnerabilities)
-        return jsonify({
-            'success': True,
-            'generated_code': generated_source,
-            'security_summary': f'Generated and validated a secure contract after analyzing {vulnerabilities_detected} confirmed vulnerability finding(s).',
-            'vulnerabilities_detected': vulnerabilities_detected,
-            'validation_status': 'Passed',
-            'compile_status': compile_status,
-            'download_url': f'/api/secure-contracts/{generation_id}/download',
-        })
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Secure contract compilation timed out.'}), 504
-    except Exception as error:
-        app.logger.exception('Secure contract generation failed for %s', uploaded_filename)
-        detail = str(error).strip() or error.__class__.__name__
-        if 'connection error' in detail.lower() or 'connection refused' in detail.lower():
-            detail = (
-                'Local Ollama is unavailable. Start Ollama and ensure '
-                'qwen2.5-coder:7b is installed before generating a secure contract.'
-            )
-        return jsonify({'error': f'Unable to generate a secure contract: {detail}'}), 500
-    finally:
-        # The input is copied only to feed the one-shot generation pipeline.
-        # Do not accumulate temporary uploads after either a successful
-        # downloadable generation or a failed validation/model request.
-        try:
-            if os.path.exists(temporary_path):
-                os.remove(temporary_path)
-        except OSError as cleanup_error:
-            app.logger.warning('Could not remove temporary secure-generation upload %s: %s', temporary_path, cleanup_error)
+@socketio.on('join_secure_generation')
+def join_secure_generation(data):
+    generation_id = (data or {}).get('generation_id', '')
+    if re.fullmatch(r'[A-Za-z0-9-]{8,64}', generation_id):
+        join_room(generation_id)
+        last_event = jobs.get(generation_id, {}).get('last_progress_event')
+        if last_event:
+            socketio.emit('secure_generation_progress', last_event, to=request.sid)
 
 
 @app.route('/api/secure-contracts/<generation_id>/download', methods=['GET'])
@@ -1141,7 +1179,7 @@ class FrontendExploitRunner(ExploitRunner):
 
 # Modified version of AgentCoordinator that emits SocketIO events
 class SocketIOAgentCoordinator(AgentCoordinator):
-    def __init__(self, job_id, model_config=None, use_rag=True):
+    def __init__(self, job_id, model_config=None, use_rag=True, progress_callback=None):
         super().__init__(model_config, use_rag=use_rag)
         self.job_id = job_id
         # Replace the default runner and generator with our custom frontend versions
@@ -1149,6 +1187,11 @@ class SocketIOAgentCoordinator(AgentCoordinator):
         self.generator = FrontendGeneratorAgent(model_config=model_config)
         # Use the global performance_tracker instance
         self.performance_tracker = performance_tracker
+        self.progress_callback = progress_callback
+
+    def _progress(self, stage, status, message, detail):
+        if self.progress_callback:
+            self.progress_callback(stage, status, message, detail)
 
     def analyze_contract(self, contract_info, auto_run_config=None):
         # Set default auto-run config if none provided
@@ -1160,6 +1203,7 @@ class SocketIOAgentCoordinator(AgentCoordinator):
 
         # 1. ProjectContextLLMAgent => inter-contract relationships
         if "contracts_dir" in contract_info and contract_info["contracts_dir"]:
+            self._progress('security_context', 'active', 'Building security context', 'Analyzing contract relationships and relevant security context.')
             print(f"Emitting agent_active event for project_context_llm for job {self.job_id}")
 
             # Start performance tracking for project context agent
@@ -1266,9 +1310,11 @@ class SocketIOAgentCoordinator(AgentCoordinator):
             # End performance tracking for project context agent
             if self.performance_tracker:
                  self.performance_tracker.end_stage()
+            self._progress('security_context', 'complete', 'Security context ready', 'Contract context is ready to guide vulnerability analysis.')
 
 
         # 2. Analyzer => all vulnerabilities
+        self._progress('vulnerability_analysis', 'active', 'Analyzing vulnerabilities', 'Searching contract behavior for potentially exploitable logic.')
         print(f"Emitting agent_active event for analyzer for job {self.job_id}")
 
         # Start performance tracking for analyzer agent
@@ -1292,6 +1338,7 @@ class SocketIOAgentCoordinator(AgentCoordinator):
 
         # We need to capture the RAG details to emit them
         if self.use_rag and self.analyzer.retriever: # Check if retriever exists
+            self._progress('security_context', 'active', 'Retrieving security knowledge', 'Retrieving relevant vulnerability knowledge to guide remediation.')
             # Emit status update about RAG process starting
             socketio.emit('agent_status', {
                 'job_id': self.job_id,
@@ -1334,6 +1381,7 @@ class SocketIOAgentCoordinator(AgentCoordinator):
                     'job_id': self.job_id,
                     'details': rag_details
                 })
+                self._progress('security_context', 'complete', 'Security knowledge retrieved', f'Retrieved {len(relevant_docs)} relevant vulnerability patterns.')
 
                 # Emit status update about RAG results
                 socketio.emit('agent_status', {
@@ -1373,6 +1421,7 @@ class SocketIOAgentCoordinator(AgentCoordinator):
             'agent': 'analyzer',
             'result': f'Found {len(vulnerabilities)} potential vulnerabilities'
         })
+        self._progress('vulnerability_analysis', 'complete', 'Vulnerability analysis complete', f'Found {len(vulnerabilities)} potential findings for validation.')
 
         if not vulnerabilities:
              print("No vulnerabilities found by analyzer.")
@@ -1383,6 +1432,7 @@ class SocketIOAgentCoordinator(AgentCoordinator):
 
 
         # 2. Skeptic => re-check validity
+        self._progress('finding_validation', 'active', 'Validating vulnerability findings', 'Cross-checking detected findings before secure code generation.')
         print(f"Emitting agent_active event for skeptic for job {self.job_id}")
 
         # Start performance tracking for skeptic agent
@@ -1436,6 +1486,7 @@ class SocketIOAgentCoordinator(AgentCoordinator):
             'agent': 'skeptic',
             'result': f'Confirmed {high_conf_count} vulnerabilities with high confidence'
         })
+        self._progress('finding_validation', 'complete', 'Finding validation complete', f'Confirmed {high_conf_count} high-confidence vulnerability finding(s).')
 
         # 3. Generate PoCs for high-confidence vulnerabilities
         generated_pocs = []
