@@ -1,0 +1,22 @@
+```json
+{
+  "vulnerabilities": [
+    {
+      "vulnerability_type": "ACCESS_CONTROL",
+      "confidence_score": 1.0,
+      "reasoning": "The `addReward` and `claim` functions are public and do not have any access control checks, allowing anyone to call these functions.",
+      "affected_functions": ["addReward(uint256)", "claim(uint256)"],
+      "impact": "Anyone can add rewards or claim tokens, leading to potential abuse of the contract by unauthorized users.",
+      "exploitation_scenario": "An attacker calls `addReward` with a large amount of Ether and then repeatedly calls `claim` to drain the reward pool."
+    },
+    {
+      "vulnerability_type": "REENTRANCY",
+      "confidence_score": 1.0,
+      "reasoning": "The `claim` function sends Ether using `transfer`, which can be exploited by a malicious contract that overrides the `fallback` or `receive` functions to drain the contract of funds.",
+      "affected_functions": ["claim(uint256)"],
+      "impact": "The attacker can repeatedly call `claim` from a malicious contract, draining the entire contract balance.",
+      "exploitation_scenario": "A malicious contract is deployed that overrides the `fallback` function. The user calls `claim`, and the malicious contract transfers funds to itself before allowing the transaction to complete."
+    }
+  ]
+}
+```

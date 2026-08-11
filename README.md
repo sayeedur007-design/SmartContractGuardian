@@ -270,6 +270,40 @@ Useful CLI options implemented in `main.py` include `--no-rag`, `--skip-poc`, `-
 
 ---
 
+## 📸 Platform Screenshots
+
+These screenshots demonstrate the main SmartContractGuardian workflows, from contract analysis and security knowledge exploration to validated findings and secure-contract generation.
+
+### 🏠 SmartContractGuardian Dashboard
+
+![SmartContractGuardian Dashboard](assests/dashboard.png)
+
+---
+
+### 📚 Vulnerability Knowledge Base
+
+![Vulnerability Knowledge Base](assests/vulnerabilities.png)
+
+---
+
+### 🔄 Analysis Workflow
+
+![Analysis Workflow](assests/workflow.png)
+
+---
+
+### ⚠️ Vulnerability Findings & Proof of Concepts
+
+![Vulnerability Findings & Proof of Concepts](assests/vulnerability-findings.png)
+
+---
+
+### 🛠️ Secure Contract Generator
+
+![Secure Contract Generator](assests/secure-generator.png)
+
+---
+
 ## ⚠️ Security and Usage Notes
 
 - Treat findings, risk levels, generated plans, and generated code as review inputs. Validate important conclusions independently.
