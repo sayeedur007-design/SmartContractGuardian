@@ -9,8 +9,6 @@ import uuid
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from openai import OpenAI
-
 from utils.print_utils import print_success, print_warning
 from utils.function_identifiers import canonical_function_id
 
@@ -22,13 +20,14 @@ class GeneratorAgent:
 
     def __init__(self, model_config=None):
         from ..config import ModelConfig
+        from ..ollama_client import OllamaClient
 
         self.model_config = model_config or ModelConfig()
         self.model_name = self.model_config.get_model("generator")
-        _, api_key_env, _ = self.model_config.get_provider_info(self.model_name)
-        self.client = OpenAI(
-            api_key=os.getenv(api_key_env),
-            **self.model_config.get_openai_args(self.model_name),
+        self.client = OllamaClient(
+            base_url=self.model_config.base_url,
+            model=self.model_name,
+            timeout=self.model_config.ollama_request_timeout,
         )
         self.project_root = Path.cwd()
         self.exploit_root = self.project_root / "exploit"
@@ -1439,10 +1438,7 @@ SOLIDITY:
     def _chat(self, prompt: str) -> str:
         messages = ([{"role": "system", "content": "Return precise Solidity engineering output."}, {"role": "user", "content": prompt}]
                     if self.model_config.supports_reasoning(self.model_name) else [{"role": "user", "content": prompt}])
-        kwargs = {"model": self.model_name, "messages": messages}
-        if self.model_name == "claude-3-7-sonnet-latest":
-            kwargs.update(max_tokens=64000, extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}})
-        response = self.client.chat.completions.create(**kwargs)
+        response = self.client.chat.completions.create(model=self.model_name, messages=messages)
         return response.choices[0].message.content or ""
 
     @staticmethod

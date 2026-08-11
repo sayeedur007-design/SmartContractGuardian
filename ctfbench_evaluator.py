@@ -23,11 +23,11 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from openai import AsyncOpenAI
 import logging
 from datetime import datetime
 from collections import defaultdict
 from llm_agents.config import ModelConfig
+from llm_agents.ollama_client import OllamaClient
 from dotenv import load_dotenv
 
 # Configure logging
@@ -160,31 +160,16 @@ class CTFBenchEvaluator:
         os.makedirs(self.results_dir, exist_ok=True)
 
     def _setup_llm_client(self):
-        """Set up the LLM client for evaluation."""
-        import os
-
-        args = self.model_config.get_openai_args(self.eval_model)
-        provider, api_key_env, base_url = self.model_config.get_provider_info(self.eval_model)
-
-        if base_url:
-            args["base_url"] = base_url
-
-        # Check if API key is available in environment
-        load_dotenv()
-        api_key = os.getenv(api_key_env)
-        if not api_key:
-            logger.warning(f"API key environment variable {api_key_env} not found. LLM evaluation will be disabled.")
-            logger.warning(f"Set the {api_key_env} environment variable to enable LLM evaluation.")
-            self.use_llm = False
-            return
-
-        args["api_key"] = api_key
-
+        """Set up the local Ollama LLM client for evaluation."""
         try:
-            self.client = AsyncOpenAI(**args)
+            self.client = OllamaClient(
+                base_url=self.model_config.base_url,
+                model=self.eval_model,
+                timeout=self.model_config.ollama_request_timeout
+            )
             logger.info(f"LLM client set up with model {self.eval_model}")
         except Exception as e:
-            logger.error(f"Failed to initialize LLM client: {e}")
+            logger.error(f"Failed to initialize local Ollama client: {e}")
             logger.warning("Falling back to string matching evaluation")
             self.use_llm = False
 
@@ -552,7 +537,8 @@ Count the number of false positives (vulnerabilities reported that are different
         # Detection evaluation
         for attempt in range(EVAL_MAX_ATTEMPTS):
             try:
-                detection_response = await self.client.chat.completions.create(
+                detection_response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
                     model=self.eval_model,
                     messages=[{"role": "user", "content": detection_prompt}],
                 )
@@ -579,7 +565,8 @@ Count the number of false positives (vulnerabilities reported that are different
         # False positive evaluation
         for attempt in range(EVAL_MAX_ATTEMPTS):
             try:
-                fp_response = await self.client.chat.completions.create(
+                fp_response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
                     model=self.eval_model,
                     messages=[{"role": "user", "content": fp_prompt}],
                 )
@@ -648,7 +635,8 @@ Provide just a number:"""
 
         for attempt in range(EVAL_MAX_ATTEMPTS):
             try:
-                fp_response = await self.client.chat.completions.create(
+                fp_response = await asyncio.to_thread(
+                    self.client.chat.completions.create,
                     model=self.eval_model,
                     messages=[{"role": "user", "content": fp_prompt}],
                 )

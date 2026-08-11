@@ -22,6 +22,7 @@ from utils.source_code_fetcher import fetch_and_flatten_contract
 from static_analysis.parse_contract import analyze_contract
 from llm_agents.agent_coordinator import AgentCoordinator
 from llm_agents.config import ModelConfig
+from llm_agents.ollama_client import validate_ollama_setup
 from llm_agents.agents.runner import ExploitRunner
 from utils.token_tracker import performance_tracker
 
@@ -65,13 +66,16 @@ def upload_contract():
         return jsonify({'error': 'No selected file'}), 400
 
     job_id = str(uuid.uuid4())
-    file_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{file.filename}")
+    filename = secure_filename(file.filename)
+    if not filename or not filename.lower().endswith('.sol'):
+        return jsonify({'error': 'Please upload a Solidity (.sol) file'}), 400
+    file_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{filename}")
     file.save(file_path)
 
     jobs[job_id] = {
         'status': 'uploaded',
         'contract_path': file_path,
-        'filename': file.filename
+        'filename': filename
     }
 
     return jsonify({
@@ -188,6 +192,11 @@ def generate_secure_contract():
             # by the analyzer for a standalone contract.
             'contracts_dir': temporary_path,
         }
+        # Validate local Ollama setup and required models before starting generation
+        is_ready, err_msg = validate_ollama_setup(["qwen2.5-coder:7b", "nomic-embed-text:latest"])
+        if not is_ready:
+            raise RuntimeError(err_msg)
+
         model_config = ModelConfig(
             context_model='ollama',
             analyzer_model='ollama',
@@ -242,7 +251,22 @@ def generate_secure_contract():
         return jsonify({'error': 'Secure contract compilation timed out.'}), 504
     except Exception as error:
         app.logger.exception('Secure contract generation failed for %s', uploaded_filename)
-        return jsonify({'error': f'Unable to generate a secure contract: {str(error)}'}), 500
+        detail = str(error).strip() or error.__class__.__name__
+        if 'connection error' in detail.lower() or 'connection refused' in detail.lower():
+            detail = (
+                'Local Ollama is unavailable. Start Ollama and ensure '
+                'qwen2.5-coder:7b is installed before generating a secure contract.'
+            )
+        return jsonify({'error': f'Unable to generate a secure contract: {detail}'}), 500
+    finally:
+        # The input is copied only to feed the one-shot generation pipeline.
+        # Do not accumulate temporary uploads after either a successful
+        # downloadable generation or a failed validation/model request.
+        try:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+        except OSError as cleanup_error:
+            app.logger.warning('Could not remove temporary secure-generation upload %s: %s', temporary_path, cleanup_error)
 
 
 @app.route('/api/secure-contracts/<generation_id>/download', methods=['GET'])
@@ -345,10 +369,10 @@ def start_analysis():
     # Get model configuration
     model_config = ModelConfig(
         context_model=data.get('context_model', 'ollama'),
-        analyzer_model=data.get('analyzer_model', 'o3-mini'),
-        skeptic_model=data.get('skeptic_model', 'o3-mini'),
-        exploiter_model=data.get('exploiter_model', 'o3-mini'),
-        generator_model=data.get('generator_model', 'o3-mini'),
+        analyzer_model=data.get('analyzer_model', 'ollama'),
+        skeptic_model=data.get('skeptic_model', 'ollama'),
+        exploiter_model=data.get('exploiter_model', 'ollama'),
+        generator_model=data.get('generator_model', 'ollama'),
         skip_poc_generation=data.get('skip_poc_generation', False),
         export_markdown=data.get('export_markdown', False),
     )
@@ -1382,7 +1406,13 @@ class SocketIOAgentCoordinator(AgentCoordinator):
 
         # Run the skeptic
         rechecked_vulns = self.skeptic.audit_vulnerabilities(
-            contract_info["source_code"], vulnerabilities
+            contract_info["source_code"],
+            vulnerabilities,
+            contract_info.get("function_details", []),
+            {
+                "llm_unavailable": bool(vuln_results.get("llm_error")),
+                "llm_error": vuln_results.get("llm_error", ""),
+            },
         )
 
         # End performance tracking for skeptic agent
@@ -1557,29 +1587,40 @@ class SocketIOAgentCoordinator(AgentCoordinator):
                         'detail': f'Executing: {poc_data.get("execution_command", "forge test")}'
                     })
 
-                    # Run the test
-                    run_result = self.runner.run_and_fix_exploit(poc_data)
+                    # Run the test with status callback
+                    def on_runner_status(state, detail):
+                        socketio.emit('agent_status', {
+                            'job_id': self.job_id,
+                            'agent': 'runner',
+                            'status': state,
+                            'detail': detail
+                        })
+
+                    run_result = self.runner.run_and_fix_exploit(poc_data, status_callback=on_runner_status)
 
                     # End performance tracking for runner agent
                     if self.performance_tracker:
                          self.performance_tracker.end_stage()
 
-
                     # Get detailed results for feedback
                     success = run_result.get('success', False)
                     retries = run_result.get('retries', 0)
+                    runner_state = run_result.get('runner_state', 'PASSED' if success else 'FAILED')
 
-                    # Create appropriate status based on result
-                    if success:
-                        status_detail = f'Test executed successfully on first attempt' if retries == 0 else f'Test fixed and executed successfully after {retries} retries'
+                    if runner_state == 'PASSED':
+                        status_detail = f'PoC validated successfully on attempt 1' if retries == 0 else f'PoC fixed and validated successfully after {retries} retries'
+                    elif runner_state == 'TIMEOUT':
+                        status_detail = 'PoC execution timed out'
+                    elif not run_result.get('compiled'):
+                        status_detail = 'PoC compilation failed'
                     else:
-                        status_detail = f'Test failed after {retries} fix attempts'
+                        status_detail = f'PoC failed after {retries + 1} attempts' if retries > 0 else 'PoC execution failed'
 
                     # Emit status with execution results
                     socketio.emit('agent_status', {
                         'job_id': self.job_id,
                         'agent': 'runner',
-                        'status': 'Execution complete',
+                        'status': runner_state,
                         'detail': status_detail
                     })
 
@@ -1587,15 +1628,20 @@ class SocketIOAgentCoordinator(AgentCoordinator):
                     socketio.emit('agent_complete', {
                         'job_id': self.job_id,
                         'agent': 'runner',
-                        'result': 'Success' if success else f'Failed after {retries} attempts'
+                        'result': status_detail,
+                        'runner_state': runner_state
                     })
 
                     # Add execution results to the PoC data
                     poc_data["execution_results"] = {
-                        "success": run_result.get("success", False),
-                        "retries": run_result.get("retries", 0),
+                        "success": success,
+                        "runner_state": runner_state,
+                        "retries": retries,
+                        "compiled": run_result.get("compiled", False),
+                        "executed": run_result.get("executed", False),
+                        "is_timeout": run_result.get("is_timeout", False),
                         "error": run_result.get("error", ""),
-                        "output": run_result.get("output", "")[:1000]  # Truncate long outputs
+                        "output": run_result.get("output", "")[:2000]
                     }
                 else:
                      # Add placeholder if auto-run is off

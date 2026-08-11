@@ -7,7 +7,6 @@ import os
 import re
 import json
 import logging
-from openai import OpenAI
 from utils.print_utils import create_progress_spinner
 
 logger = logging.getLogger(__name__)
@@ -24,21 +23,16 @@ class ProjectContextLLMAgent:
     
     def __init__(self, model_config=None):
         from ..config import ModelConfig
+        from ..ollama_client import OllamaClient
         
         self.model_config = model_config or ModelConfig()
         self.model_name = self.model_config.get_model("context")
         
-        # Get provider info for the selected model
-        if hasattr(self.model_config, "get_provider_info"):
-            _, api_key_env, _ = self.model_config.get_provider_info(self.model_name)
-            # Initialize OpenAI client with the correct settings
-            self.client = OpenAI(
-                api_key=os.getenv(api_key_env),
-                **self.model_config.get_openai_args(self.model_name)
-            )
-        else:
-            # Fallback to default OpenAI client
-            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.client = OllamaClient(
+            base_url=self.model_config.base_url,
+            model=self.model_name,
+            timeout=self.model_config.ollama_request_timeout
+        )
             
         # Simple regex patterns for initial metadata extraction
         self.contract_pattern = re.compile(r'\b(contract|interface|library)\s+(\w+)(?:\s+is\s+([^\{]+))?\s*\{', re.MULTILINE)
@@ -79,6 +73,31 @@ class ProjectContextLLMAgent:
         
         contract_metadata = self._extract_basic_metadata(contract_files)
         logger.info("Analyzing contract relationships")
+
+        # A single uploaded Solidity file has no inter-contract relationships
+        # to infer.  Avoid an otherwise redundant local-model request before
+        # Analyzer and Skeptic; retain the same source-derived UI context.
+        if len(contract_metadata) <= 1:
+            contract_info, source_dependencies = self._build_project_structure(contract_metadata)
+            return {
+                'llm_analysis': '',
+                'insights': [],
+                'dependencies': source_dependencies,
+                'vulnerabilities': [],
+                'recommendations': [],
+                'important_functions': [],
+                'contract_files': [m.get('file_path', 'unknown') for m in contract_metadata],
+                'contract_details': contract_info,
+                'call_graph': call_graph,
+                'mermaid_diagram': self._generate_mermaid_diagram(contract_info, source_dependencies),
+                'stats': {
+                    'total_contracts': len(contract_metadata),
+                    'total_relationships': len(source_dependencies),
+                    'total_vulnerabilities': 0,
+                    'total_recommendations': 0,
+                    'has_inter_contract_calls': bool(source_dependencies),
+                },
+            }
         
         context = self._analyze_with_llm(contract_metadata, call_graph, contracts_dir)
         logger.info("LLM contract analysis complete")
@@ -156,7 +175,34 @@ class ProjectContextLLMAgent:
             user_prompt += "\n## Call Graph (from Slither analysis)\n"
             user_prompt += json.dumps(call_graph, indent=2)
         
-        response = self._call_llm(system_prompt, user_prompt)
+        # Project metadata is useful even when the local model is restarting.
+        # Keep the source-derived graph available and allow the main analyzer to
+        # continue instead of failing the entire workflow at this optional stage.
+        try:
+            response = self._call_llm(system_prompt, user_prompt)
+        except Exception as error:
+            logger.warning("Project-context LLM unavailable; using source-derived context: %s", error)
+            contract_info, source_dependencies = self._build_project_structure(contract_metadata)
+            return {
+                'llm_analysis': '',
+                'insights': [],
+                'dependencies': source_dependencies,
+                'vulnerabilities': [],
+                'recommendations': [],
+                'important_functions': [],
+                'contract_files': [m.get('file_path', 'unknown') for m in contract_metadata],
+                'contract_details': contract_info,
+                'call_graph': call_graph,
+                'mermaid_diagram': self._generate_mermaid_diagram(contract_info, source_dependencies),
+                'llm_error': f'Local project-context model unavailable: {error}',
+                'stats': {
+                    'total_contracts': len(contract_metadata),
+                    'total_relationships': len(source_dependencies),
+                    'total_vulnerabilities': 0,
+                    'total_recommendations': 0,
+                    'has_inter_contract_calls': bool(source_dependencies),
+                },
+            }
         
         try:
             insights = self._extract_insights_from_response(response)

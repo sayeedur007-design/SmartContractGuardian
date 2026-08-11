@@ -121,7 +121,12 @@ class AgentCoordinator:
         vulnerabilities = vuln_results.get("vulnerabilities", [])
         if not vulnerabilities:
             console.print("[bold yellow]AnalyzerAgent: No vulnerabilities found[/bold yellow]")
-            return {"status": "no_vulnerability_found"}
+            return {
+                "status": "no_vulnerability_found",
+                "rechecked_vulnerabilities": [],
+                "generated_pocs": [],
+                "poc_metrics": {},
+            }
 
         console.print(f"[bold green]✓ AnalyzerAgent: Found {len(vulnerabilities)} potential vulnerabilities[/bold green]")
         log_findings("Analyzer findings", vulnerabilities)
@@ -132,7 +137,13 @@ class AgentCoordinator:
         performance_tracker.start_stage("skeptic_agent")
         console.print("\n[bold blue]🧐 SkepticAgent: Re-checking vulnerability validity...[/bold blue]")
         rechecked_vulns = self.skeptic.audit_vulnerabilities(
-            contract_info["source_code"], vulnerabilities, contract_info.get("function_details", [])
+            contract_info["source_code"],
+            vulnerabilities,
+            contract_info.get("function_details", []),
+            {
+                "llm_unavailable": bool(vuln_results.get("llm_error")),
+                "llm_error": vuln_results.get("llm_error", ""),
+            },
         )
 
         # Extra deduplication after skeptic

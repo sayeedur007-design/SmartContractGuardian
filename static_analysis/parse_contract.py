@@ -9,8 +9,37 @@ from typing import Dict, List
 from pathlib import Path
 import json
 import os
+import re
 from .extract_contracts import process_contract_file
 from utils.function_identifiers import canonical_function_id
+
+
+_PRAGMA_VERSION = re.compile(r"\bpragma\s+solidity\s+[^;]*?(0)\.(\d+)\.")
+
+
+def _solc_for_source(filepath: str) -> tuple[str | None, str]:
+    """Select the locally installed compiler compatible with a Solidity pragma.
+
+    Phase 5 contracts remain on the existing global 0.8.20 compiler.  Legacy
+    0.4.x sources use the separately installed 0.4.26 binary only for that
+    Slither invocation; neither PATH nor the global compiler is changed.
+    """
+    try:
+        source = Path(filepath).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, "--via-ir --optimize"
+
+    match = _PRAGMA_VERSION.search(source)
+    if not match or int(match.group(2)) >= 5:
+        return None, "--via-ir --optimize"
+
+    legacy_solc = Path(r"C:\Solidity\solc-0.4.26\solc.exe")
+    if not legacy_solc.is_file():
+        raise RuntimeError(
+            "Solidity 0.4.x source requires the local legacy compiler at "
+            f"{legacy_solc}, but it is unavailable."
+        )
+    return str(legacy_solc), "--optimize"
 
 
 def analyze_contract(filepath: str):
@@ -50,12 +79,14 @@ def analyze_contract(filepath: str):
     if os.name == "nt" and os.path.isabs(filepath):
         slither_target = os.path.relpath(filepath, os.getcwd())
 
-    # Initialize Slither on the given file. This parses and compiles the contract.
-    slither = Slither(
-        slither_target,
-        solc_args="--via-ir --optimize",
-        solc_remaps=solc_remaps,
-    )
+    # Initialize Slither using a compiler compatible with the source pragma.
+    # The legacy compiler is process-local to this invocation, so modern 0.8
+    # analysis continues to use the existing global compiler unchanged.
+    selected_solc, solc_args = _solc_for_source(filepath)
+    slither_kwargs = {"solc_args": solc_args, "solc_remaps": solc_remaps}
+    if selected_solc:
+        slither_kwargs["solc"] = selected_solc
+    slither = Slither(slither_target, **slither_kwargs)
 
     # slither = Slither(filepath)
     printer = PrinterCallGraphV2(slither, None)

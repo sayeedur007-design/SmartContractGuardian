@@ -222,7 +222,7 @@ def build_chroma_vectorstore_from_json(
 
     print_step("Initializing Local ChromaDB...")
     try:
-        embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url="http://127.0.0.1:11434")
+        embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
         vectorstore = Chroma(
             persist_directory=persist_directory,
             embedding_function=embeddings,

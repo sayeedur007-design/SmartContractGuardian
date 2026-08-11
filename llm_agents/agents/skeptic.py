@@ -3,7 +3,6 @@
 # ==============================
 import os
 import json
-from openai import OpenAI
 import re
 from pathlib import Path
 from utils.print_utils import create_progress_spinner, print_warning
@@ -17,17 +16,15 @@ class SkepticAgent:
 
     def __init__(self, model_config=None):
         from ..config import ModelConfig
+        from ..ollama_client import OllamaClient
 
         self.model_config = model_config or ModelConfig()
         self.model_name = self.model_config.get_model("skeptic")
 
-        # Get provider info for the selected model
-        _, api_key_env, _ = self.model_config.get_provider_info(self.model_name)
-
-        # Initialize OpenAI client with the correct settings
-        self.client = OpenAI(
-            api_key=os.getenv(api_key_env),
-            **self.model_config.get_openai_args(self.model_name)
+        self.client = OllamaClient(
+            base_url=self.model_config.base_url,
+            model=self.model_name,
+            timeout=self.model_config.ollama_request_timeout
         )
 
     def audit_vulnerabilities(self, contract_source: str, vulnerabilities: list,
@@ -114,10 +111,7 @@ Return ONLY valid JSON in this format:
             from utils.token_tracker import token_tracker
             
             try:
-                if self.model_name == "claude-3-7-sonnet-latest":
-                    resp = self.client.chat.completions.create(model=self.model_name, messages=messages, max_tokens=64000, extra_body={"thinking": {"type": "enabled", "budget_tokens": 5000}})
-                else:
-                    resp = self.client.chat.completions.create(model=self.model_name, messages=messages)
+                resp = self.client.chat.completions.create(model=self.model_name, messages=messages)
             except Exception as exc:
                 # Analyzer findings backed by a deterministic source rule are
                 # still valid evidence; do not turn an Ollama outage into an
@@ -251,7 +245,7 @@ Return ONLY valid JSON in this format:
                 continue
             if "bad_randomness" in vuln_type and not cls._randomness_source_evidence(finding, function_details or []):
                 continue
-            if "arithmetic" in vuln_type and not cls._arithmetic_source_evidence(finding, function_details or []):
+            if "arithmetic" in vuln_type and not cls._arithmetic_source_evidence(finding, function_details or [], contract_source):
                 continue
 
             if verdict_name == "REJECTED":
@@ -403,14 +397,20 @@ Return ONLY valid JSON in this format:
         return False
 
     @staticmethod
-    def _arithmetic_source_evidence(finding: dict, function_details: list) -> bool:
+    def _arithmetic_source_evidence(finding: dict, function_details: list, contract_source: str = "") -> bool:
         names = {str(item).split("(", 1)[0].split(".")[-1] for item in (finding.get("affected_functions", []) or [])}
+        legacy = bool(re.search(r"pragma\s+solidity\s+[\^~]?0\.[0-7]\b", contract_source or ""))
         for detail in function_details or []:
             if str(detail.get("function_id", "")).split("(", 1)[0] not in names:
                 continue
             source = str(detail.get("content") or "")
-            if re.search(r"[+\-*/]|(?:\+\+|--|[+\-*/]=)", source):
-                return True
+            if not legacy:
+                if re.search(r"\bunchecked\s*\{[\s\S]*?(?:\+\+|--|[+\-*]=|\+|\-|\*|/)", source, re.I):
+                    return True
+            else:
+                if not re.search(r"\bSafeMath\b", contract_source or "", re.I):
+                    if re.search(r"[+\-*/]=|\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*[-+]", source):
+                        return True
         return False
 
     @staticmethod

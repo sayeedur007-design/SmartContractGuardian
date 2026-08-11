@@ -69,7 +69,6 @@ langchain-community==0.3.13
 langchain-chroma==0.2.2
 langchain-core==0.3.33
 langchain-ollama==0.2.3
-langchain-openai==0.2.14
 langchain-text-splitters==0.3.4
 langdetect==1.0.9
 langsmith==0.2.4
@@ -89,7 +88,6 @@ networkx==3.4.2
 nltk==3.9.1
 numpy==1.26.4
 olefile==0.47
-openai==1.58.1
 orjson==3.10.12
 packaging==24.2
 pandas==2.2.3

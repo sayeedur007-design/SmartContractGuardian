@@ -1,14 +1,36 @@
-```json
 {
   "vulnerabilities": [
     {
+      "vulnerability_type": "ACCESS_CONTROL",
+      "confidence_score": 1.0,
+      "reasoning": "The `newOwner` function in the MultiOwnable contract does not have an access control modifier, allowing any address to add new owners without restriction.",
+      "affected_functions": ["MultiOwnable.newOwner(address)"],
+      "impact": "Unauthorized addition of new owners can lead to loss of control over the contract as malicious users could gain administrative rights.",
+      "exploitation_scenario": "An attacker could call `newOwner` with their own address to become a new owner and take control of the contract."
+    },
+    {
       "vulnerability_type": "REENTRANCY",
-      "confidence_score": 0.9,
-      "reasoning": "The contract allows malicious users to initiate a withdrawal and then re-enter the transaction before completing it, withdrawing an additional amount.",
-      "affected_functions": ["withdraw(uint256)"],
-      "impact": "Users can withdraw more than intended, potentially leading to loss of funds.",
-      "exploitation_scenario": "User initiates 'emergencyWithdraw' call. Before the transfer completes, the user re-enters 'withdraw' and calls 'emergencyWithdraw' again, withdrawing more tokens than intended."
+      "confidence_score": 0.5,
+      "reasoning": "The `claim` function does not check for reentrancy, which could allow an attacker to repeatedly call the function and steal funds.",
+      "affected_functions": ["RewardPool.claim(uint256)"],
+      "impact": "If exploited, the contract would be vulnerable to a reentrancy attack, leading to unauthorized withdrawal of funds multiple times.",
+      "exploitation_scenario": "An attacker could deposit Ether into the contract and then repeatedly call `claim` before the transfer is completed. This would allow them to steal more than the requested amount."
+    },
+    {
+      "vulnerability_type": "BUSINESS_LOGIC",
+      "confidence_score": 0.8,
+      "reasoning": "The `createDaoPOLSKAtokens` function lacks a check for potential overflow when updating the total supply.",
+      "affected_functions": ["RewardPool.createDaoPOLSKAtokens(address)"],
+      "impact": "An attacker could cause an overflow by sending a very large value, potentially leading to incorrect token calculations or contract failure.",
+      "exploitation_scenario": "If `totalSupply` exceeds the maximum value for a uint256, it would wrap around, causing the contract to behave unpredictably and potentially losing track of total tokens."
+    },
+    {
+      "vulnerability_type": "BUSINESS_LOGIC",
+      "confidence_score": 0.7,
+      "reasoning": "The `createDaoPOLSKAtokens` function does not validate if `msg.sender` is allowed to create tokens, leading to potential unauthorized creation.",
+      "affected_functions": ["RewardPool.createDaoPOLSKAtokens(address)"],
+      "impact": "If exploited, any address could mint new tokens without proper authorization, leading to an inflationary attack.",
+      "exploitation_scenario": "An attacker could call `createDaoPOLSKAtokens` with a non-authorized address and send a significant amount of Ether to mint a large number of tokens."
     }
   ]
 }
-```

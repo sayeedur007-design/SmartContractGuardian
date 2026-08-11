@@ -8,8 +8,8 @@ import uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from openai import OpenAI
 from ..config import ModelConfig
+from ..ollama_client import OllamaClient
 from utils.print_utils import print_warning
 from .generator import GeneratorAgent
 
@@ -18,42 +18,80 @@ class ExploitRunner:
     def __init__(self, model_config=None):
         self.model_config = model_config or ModelConfig()
         self.model_name = self.model_config.get_model("generator")
-        _, api_key_env, _ = self.model_config.get_provider_info(self.model_name)
-        self.client = OpenAI(api_key=os.getenv(api_key_env), **self.model_config.get_openai_args(self.model_name))
+        self.client = OllamaClient(
+            base_url=self.model_config.base_url,
+            model=self.model_name,
+            timeout=self.model_config.ollama_request_timeout,
+        )
         self.max_retries = self.model_config.poc_max_retries
         self.project_root = Path.cwd()
         self.exploit_root = self.project_root / "exploit"
         # Reuse one validator/client across all repairs; do not create one per attempt.
         self.validator = GeneratorAgent(self.model_config)
 
-    def run_and_fix_exploit(self, poc_data: Dict) -> Dict:
+    def run_and_fix_exploit(self, poc_data: Dict, status_callback=None) -> Dict:
+        def emit_status(state: str, detail: str):
+            if status_callback:
+                try:
+                    status_callback(state, detail)
+                except Exception as cb_err:
+                    print_warning(f"Runner status callback error: {cb_err}")
+
+        emit_status("PREPARING", "Preparing isolated test environment")
         path = Path(poc_data.get("exploit_file", ""))
         if not path.is_file():
-            return self._result(error=poc_data.get("generation_error", "Exploit file not found"))
+            emit_status("ERROR", "Exploit file not found")
+            return self._result(error=poc_data.get("generation_error", "Exploit file not found"), runner_state="ERROR")
 
         diagnostics, output = [], ""
         previous_attempt = ""
         last_compile = {"compiled": False, "compile_error": "", "stdout": "", "stderr": "", "compile_time": 0.0}
         last_execution = {"executed": False, "success": False, "runtime_error": "", "stdout": "", "stderr": "", "execution_time": 0.0, "gas_used": None, "execution_trace": ""}
+        
+        actual_retries_attempted = 0
+        final_state = "FAILED"
+
         for attempt in range(self.max_retries + 1):
+            if attempt > 0:
+                actual_retries_attempted = attempt
+
+            emit_status("COMPILING", f"Compiling generated PoC (attempt {attempt + 1})")
             current = path.read_text(encoding="utf-8")
             last_compile = self.validator.compile_candidate(current, attempt=attempt)
+            
             if last_compile["compiled"]:
+                emit_status("EXECUTING", f"Executing exploit test (attempt {attempt + 1})")
                 last_execution = self._execute_test(path, attempt, current)
                 output = last_execution["output"]
                 diagnostic = self._diagnose(output)
                 diagnostics.append(diagnostic)
-                if last_execution["success"]:
-                    result = self._result(path, attempt, diagnostics, last_compile, last_execution)
+
+                if last_execution.get("is_timeout"):
+                    final_state = "TIMEOUT"
+                    emit_status("TIMEOUT", "PoC execution timed out")
+                    result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution, runner_state="TIMEOUT")
                     self._cleanup_job_workspace(path)
                     return result
+
+                emit_status("VALIDATING", f"Validating exploit result (attempt {attempt + 1})")
+                if last_execution["success"]:
+                    final_state = "PASSED"
+                    detail = f"PoC validated successfully on attempt {attempt + 1}"
+                    emit_status("PASSED", detail)
+                    result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution, runner_state="PASSED")
+                    self._cleanup_job_workspace(path)
+                    return result
+                else:
+                    final_state = "FAILED"
             else:
+                final_state = "FAILED"
                 output = last_compile["output"]
                 diagnostic = self._diagnose(output)
                 diagnostics.append(diagnostic)
 
             if attempt == self.max_retries:
                 break
+
             current = path.read_text(encoding="utf-8")
             candidate = self._fix_test_code(current, output, diagnostic, previous_attempt, poc_data.get("target_contract", {}))
             previous_attempt = current
@@ -68,7 +106,8 @@ class ExploitRunner:
                 continue
             path.write_text(candidate, encoding="utf-8")
 
-        result = self._result(path, self.max_retries, diagnostics, last_compile, last_execution)
+        emit_status("FAILED", f"PoC failed after {actual_retries_attempted + 1} attempts" if actual_retries_attempted > 0 else "PoC execution failed")
+        result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution, runner_state=final_state)
         self._cleanup_job_workspace(path)
         return result
 
@@ -77,6 +116,7 @@ class ExploitRunner:
         started = time.perf_counter()
         stdout = stderr = ""
         returncode = None
+        is_timeout = False
         try:
             (execution_root / "test").mkdir(parents=True)
             self.validator._copy_candidate_sources(code, execution_root / "src")
@@ -105,7 +145,11 @@ class ExploitRunner:
                 env=GeneratorAgent._forge_env(),
             )
             stdout, stderr, returncode = result.stdout or "", result.stderr or "", result.returncode
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            is_timeout = True
+            stderr = f"Execution timed out (Forge test exceeded {self.model_config.forge_test_timeout} seconds)"
+            stdout = exc.stdout or "" if isinstance(exc.stdout, str) else ""
+        except OSError as exc:
             stderr = f"Unable to execute forge test: {exc}"
         finally:
             shutil.rmtree(execution_root, ignore_errors=True)
@@ -116,17 +160,18 @@ class ExploitRunner:
         execution_time = time.perf_counter() - started
         output = stdout + ("\n" if stdout and stderr else "") + stderr
         # Foundry's return code is stable across output-format changes.
-        success = returncode == 0
+        success = (returncode == 0) and not is_timeout
         self._write_execution_artifacts(path, code, stdout, stderr, attempt)
         return {
-            "executed": returncode is not None,
+            "executed": returncode is not None or is_timeout,
             "success": success,
+            "is_timeout": is_timeout,
             "runtime_error": "" if success else (stderr or stdout or "Forge execution failed with no diagnostic."),
             "stdout": stdout, "stderr": stderr, "output": output,
             "execution_time": execution_time,
             "gas_used": self._extract_gas(output),
             "execution_trace": output,
-            "failure_reason": "" if success else self._failure_reason(output, returncode),
+            "failure_reason": "TIMEOUT" if is_timeout else ("" if success else self._failure_reason(output, returncode)),
         }
 
     def _cleanup_job_workspace(self, path: Path) -> None:
@@ -145,21 +190,31 @@ class ExploitRunner:
             print_warning(f"Unable to remove isolated Forge workspace for {path}: {exc}")
 
     def _result(self, path: Optional[Path] = None, retries: int = 0, diagnostics=None,
-                compile_result=None, execution_result=None, error: str = "") -> Dict:
+                compile_result=None, execution_result=None, error: str = "", runner_state: str = "FAILED") -> Dict:
         compile_result = compile_result or {"compiled": False, "compile_error": error, "stdout": "", "stderr": "", "compile_time": 0.0}
         execution_result = execution_result or {"executed": False, "success": False, "runtime_error": error, "stdout": "", "stderr": "", "output": "", "execution_time": 0.0, "gas_used": None, "execution_trace": ""}
         success = bool(compile_result["compiled"] and execution_result["success"])
-        return {"success": success, "compiled": bool(compile_result["compiled"]),
-                "executed": bool(execution_result["executed"]), "compile_error": compile_result.get("compile_error", ""),
-                "runtime_error": execution_result.get("runtime_error", ""),
-                "failure_reason": execution_result.get("failure_reason", "") or ("CompilationFailure" if not compile_result["compiled"] else ""),
-                "stdout": execution_result.get("stdout", "") or compile_result.get("stdout", ""),
-                "stderr": execution_result.get("stderr", "") or compile_result.get("stderr", ""),
-                "output": execution_result.get("output", "") or compile_result.get("output", ""),
-                "error": error or execution_result.get("runtime_error", "") or compile_result.get("compile_error", ""),
-                "file_path": str(path) if path else "", "retries": retries, "diagnostics": diagnostics or [],
-                "compile_time": compile_result.get("compile_time", 0.0), "execution_time": execution_result.get("execution_time", 0.0),
-                "gas_used": execution_result.get("gas_used"), "execution_trace": execution_result.get("execution_trace", "")}
+        return {
+            "success": success,
+            "runner_state": runner_state,
+            "compiled": bool(compile_result["compiled"]),
+            "executed": bool(execution_result["executed"]),
+            "is_timeout": bool(execution_result.get("is_timeout", False)),
+            "compile_error": compile_result.get("compile_error", ""),
+            "runtime_error": execution_result.get("runtime_error", ""),
+            "failure_reason": execution_result.get("failure_reason", "") or ("CompilationFailure" if not compile_result["compiled"] else ""),
+            "stdout": execution_result.get("stdout", "") or compile_result.get("stdout", ""),
+            "stderr": execution_result.get("stderr", "") or compile_result.get("stderr", ""),
+            "output": execution_result.get("output", "") or compile_result.get("output", ""),
+            "error": error or execution_result.get("runtime_error", "") or compile_result.get("compile_error", ""),
+            "file_path": str(path) if path else "",
+            "retries": retries,
+            "diagnostics": diagnostics or [],
+            "compile_time": compile_result.get("compile_time", 0.0),
+            "execution_time": execution_result.get("execution_time", 0.0),
+            "gas_used": execution_result.get("gas_used"),
+            "execution_trace": execution_result.get("execution_trace", "")
+        }
 
     def _write_execution_artifacts(self, path: Path, code: str, stdout: str, stderr: str, attempt: int) -> None:
         reports = self.project_root / "reports"

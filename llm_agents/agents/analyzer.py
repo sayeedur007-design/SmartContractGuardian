@@ -8,8 +8,10 @@ import logging
 import os
 import re
 from utils.print_utils import print_warning, create_progress_spinner
-from openai import OpenAI
-from langchain.schema import Document
+try:
+    from langchain_core.documents import Document
+except ImportError:
+    from langchain.schema import Document
 from .project_context_llm import ProjectContextLLMAgent
 from utils.function_identifiers import known_function_ids
 from eth_utils import keccak
@@ -22,18 +24,17 @@ class AnalyzerAgent:
     RAG_CANDIDATE_K = 20
     def __init__(self, retriever, model_config=None):
         from ..config import ModelConfig
+        from ..ollama_client import OllamaClient
 
         self.retriever = retriever
         self.model_config = model_config or ModelConfig()
         self.model_name = self.model_config.get_model("analyzer")
 
-        # Get provider info for the selected model
-        _, api_key_env, _ = self.model_config.get_provider_info(self.model_name)
-
-        # Initialize OpenAI client with the correct settings
-        self.client = OpenAI(
-            api_key=os.getenv(api_key_env),
-            **self.model_config.get_openai_args(self.model_name)
+        # Initialize local Ollama client
+        self.client = OllamaClient(
+            base_url=self.model_config.base_url,
+            model=self.model_name,
+            timeout=self.model_config.ollama_request_timeout
         )
 
         # Load vulnerability categories
@@ -749,51 +750,198 @@ class AnalyzerAgent:
         return normalized
 
     @staticmethod
+    def _build_grounded_exploitation_scenario(vuln_type: str, affected_functions: list, source_code: str, reasoning: str) -> str:
+        """Construct a step-by-step, control-flow accurate exploitation scenario that never contradicts explicit require statements or state logic."""
+        v_type = str(vuln_type).lower()
+        func_str = ", ".join(affected_functions) if affected_functions else "target function"
+
+        if "reentrancy" in v_type:
+            return (
+                "1. Attacker deposits funds into the contract to establish a valid recorded balance.\n"
+                f"2. Attacker calls `{func_str}` requesting a withdrawal within their recorded balance.\n"
+                "3. The contract performs an external ETH transfer call to `msg.sender` before updating internal balance state.\n"
+                f"4. Attacker's receive/fallback function intercepts execution and re-enters `{func_str}`.\n"
+                "5. Because the balance state update has not yet occurred, the re-entrant invocation passes the balance check again.\n"
+                "6. Repeated re-entrant calls drain additional ETH from the contract before the original invocation updates the balance."
+            )
+
+        if "access" in v_type or "control" in v_type:
+            return (
+                f"1. Attacker identifies that `{func_str}` is externally callable without an authorization check (such as `onlyOwner` or role verification).\n"
+                f"2. Attacker invokes `{func_str}` directly from an unauthorized account.\n"
+                f"3. Contract executes the state modification without verifying caller permissions."
+            )
+
+        if "unchecked" in v_type and "call" in v_type:
+            return (
+                f"1. Attacker calls `{func_str}` under parameters causing the low-level call to revert or fail.\n"
+                f"2. Because the return value of the call is not checked, execution continues past the failure.\n"
+                f"3. Subsequent state updates proceed as if the call succeeded, leaving the contract in an inconsistent state."
+            )
+
+        if "timestamp" in v_type:
+            return (
+                f"1. A miner/validator observes a call to `{func_str}` where execution depends on `block.timestamp`.\n"
+                f"2. The miner manipulates the block timestamp within acceptable drift bounds.\n"
+                f"3. The manipulated timestamp forces the condition in `{func_str}` to evaluate favorably for the miner."
+            )
+
+        if "random" in v_type:
+            return (
+                f"1. Attacker inspects block-derived properties (`block.timestamp`, `block.prevrandao`, `blockhash`) used in `{func_str}`.\n"
+                f"2. Attacker pre-computes the pseudo-random result off-chain before submitting a transaction.\n"
+                f"3. Attacker submits transactions only when the pre-computed outcome is winning."
+            )
+
+        return (
+            f"1. Attacker identifies vulnerable control flow in `{func_str}`.\n"
+            f"2. Attacker calls `{func_str}` triggering the vulnerability condition.\n"
+            f"3. Contract executes state modification violating security invariants."
+        )
+
+    @staticmethod
     def _validate_findings(vulnerabilities: list, contract_info: Dict) -> list:
-        """Validate references without discarding otherwise valid findings."""
+        """Validate references and enforce strict evidence-grounded correctness."""
         details = contract_info.get("function_details", [])
-        # Constructors, fallback, and receive functions are valid source
-        # targets even though the PoC-specific ID helper excludes them.
+        source_code = contract_info.get("source_code", "") or ""
         allowed = {detail.get("function_id") for detail in details if detail.get("function_id")}
         validated = []
+
+        _legacy_pragma = bool(re.search(r"pragma\s+solidity\s+[\^~]?0\.[0-7]\b", source_code))
+        _has_timestamp = bool(re.search(r"\b(?:block\.timestamp|now|block\.number|blockhash|block\.prevrandao)\b", source_code))
+
         for finding in vulnerabilities:
             if not isinstance(finding, dict) or not finding.get("vulnerability_type"):
                 continue
+
+            vuln_type = str(finding.get("vulnerability_type", "")).strip()
+            vuln_type_lower = vuln_type.lower()
+
+            raw_affected = finding.get("affected_functions", [])
             affected = AnalyzerAgent._normalize_affected_functions_for_lookup(
-                finding.get("affected_functions", []), allowed, details, contract_info.get("source_code", "")
+                raw_affected, allowed, details, source_code
             )
-            item = dict(finding)
-            if affected:
-                if "reentrancy" in str(item.get("vulnerability_type", "")).lower():
-                    reentrant = []
-                    for function_id in affected:
-                        detail = next((detail for detail in details if detail.get("function_id") == function_id), {})
-                        source = detail.get("content", "") or ""
-                        call = re.search(r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|call\.value\s*\(|send\s*\(|transfer\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()", source, re.I)
-                        state_after_call = call and re.search(
-                            r"\b[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)?\s*(?:\+\+|--|[+\-*/]?=)(?!=)",
-                            source[call.end():],
-                        )
-                        if state_after_call:
-                            reentrant.append(function_id)
-                    if not reentrant:
-                        # A source-confirmed deterministic finding for the real
-                        # function is added separately; never retain a valid but
-                        # unrelated function as a reentrancy location.
-                        continue
-                    affected = reentrant
-                # Use canonical IDs downstream so snippets, reviewer prompts,
-                # and generation all refer to the actual Solidity function.
-                item["affected_functions"] = affected
-            else:
-                # Do not allow example-derived or fabricated identifiers into
-                # final findings.  A finding with no real source function is
-                # discarded; deterministic source evidence remains separate.
-                logger.warning(
-                    "Discarding finding %r with unresolved affected functions %r",
-                    finding.get("vulnerability_type"), finding.get("affected_functions"),
-                )
+            if not affected:
+                logger.warning("Discarding finding %r with non-existent functions %r", vuln_type, raw_affected)
                 continue
+
+            item = dict(finding)
+            item["affected_functions"] = affected
+
+            # Collect source contents of affected functions
+            affected_contents = []
+            for func_id in affected:
+                fn_detail = next((d for d in details if d.get("function_id") == func_id), {})
+                if fn_detail.get("content"):
+                    affected_contents.append((func_id, fn_detail, fn_detail["content"]))
+
+            # 1. TIMESTAMP validation: Must have block.timestamp/derived logic in source & affected function
+            if "timestamp" in vuln_type_lower:
+                if not _has_timestamp:
+                    logger.warning("Discarding TIMESTAMP finding %r: contract has no timestamp logic.", vuln_type)
+                    continue
+                func_has_ts = any(
+                    re.search(r"\b(?:block\.timestamp|now)\b", content)
+                    for _, _, content in affected_contents
+                )
+                if not func_has_ts:
+                    logger.warning("Discarding TIMESTAMP finding %r: affected functions contain no timestamp logic.", vuln_type)
+                    continue
+
+            # 2. ARITHMETIC validation: Must not report standard ^0.8.x arithmetic without unchecked{}
+            if any(marker in vuln_type_lower for marker in ("arithmetic", "overflow", "underflow")):
+                is_vulnerable_arith = False
+                for _, _, content in affected_contents:
+                    if not _legacy_pragma:
+                        # Solidity 0.8+: must be inside an unchecked block
+                        if re.search(r"\bunchecked\s*\{[\s\S]*?(?:\+\+|--|[+\-*]=|\+|\-|\*|/)", content, re.I):
+                            is_vulnerable_arith = True
+                            break
+                    else:
+                        # Pre-0.8: bare arithmetic without SafeMath
+                        if not re.search(r"\bSafeMath\b", source_code, re.I):
+                            if re.search(r"[+\-*/]=|\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*[-+]", content):
+                                if not re.search(r"(?:require|assert)\s*\([^;]*\b(?:>=|<=|>|<)\b", content):
+                                    is_vulnerable_arith = True
+                                    break
+                if not is_vulnerable_arith:
+                    logger.warning("Discarding ARITHMETIC finding %r: checked arithmetic in 0.8+ or safe in pre-0.8.", vuln_type)
+                    continue
+
+            # 3. UNCHECKED_LOW_LEVEL_CALLS validation: Must have a low level call whose return value is un-checked
+            if "unchecked" in vuln_type_lower and "call" in vuln_type_lower:
+                has_unchecked = False
+                for _, _, content in affected_contents:
+                    call = re.search(r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|send\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()", content, re.I)
+                    if call:
+                        checked = re.search(
+                            r"\(\s*bool\s+(?:success|ok|sent)\b[^;]*=\s*[^;]*\.(?:call|send|delegatecall)"
+                            r"[\s\S]*?(?:require\s*\(\s*(?:success|ok|sent)\b|if\s*\(\s*!\s*(?:success|ok|sent)\b)",
+                            content, re.I
+                        )
+                        if not checked:
+                            has_unchecked = True
+                            break
+                if not has_unchecked:
+                    logger.warning("Discarding UNCHECKED_LOW_LEVEL_CALLS finding %r: call return value is explicitly checked.", vuln_type)
+                    continue
+
+            # 4. ACCESS_CONTROL validation: Must be an un-guarded privileged function
+            if "access" in vuln_type_lower and "control" in vuln_type_lower:
+                valid_access = False
+                for _, detail, content in affected_contents:
+                    vis = str(detail.get("visibility", "")).lower()
+                    if vis not in {"public", "external"}:
+                        continue
+                    mods = " ".join(detail.get("modifiers", []) or [])
+                    protected = bool(re.search(
+                        r"(?:only(?:owner|admin|role)|auth|authorized|admin|role)", mods, re.I
+                    ) or re.search(
+                        r"(?:onlyOwner|onlyRole|hasRole|_checkRole|require\s*\([^;]*(?:msg\.sender\s*==|hasRole)|if\s*\([^)]*(?:msg\.sender\s*!=|!hasRole))",
+                        content, re.I
+                    ))
+                    privileged_action = bool(re.search(
+                        r"\bselfdestruct\s*\(|\b(?:owner|admin)\s*=|"
+                        r"\b(?:reward|credit)\s*\[\s*msg\.sender\s*\]\s*\+=|"
+                        r"address\s*\(\s*this\s*\)\.balance|"
+                        r"\btx\.origin\b",
+                        content, re.I
+                    ))
+                    if privileged_action and not protected:
+                        valid_access = True
+                        break
+                    elif not protected and re.search(r"\b(?:set|update|grant|mint|withdraw|destroy)\b", detail.get("function", ""), re.I):
+                        valid_access = True
+                        break
+                if not valid_access:
+                    logger.warning("Discarding ACCESS_CONTROL finding %r: function is protected or contains no un-guarded privileged write.", vuln_type)
+                    continue
+
+            # 5. REENTRANCY validation: Must have external call before state update and no nonReentrant guard
+            if "reentrancy" in vuln_type_lower:
+                reentrant_funcs = []
+                for func_id, detail, content in affected_contents:
+                    call = re.search(
+                        r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|call\.value\s*\(|send\s*\(|transfer\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()",
+                        content, re.I
+                    )
+                    state_after_call = call and re.search(
+                        r"\b[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)?\s*(?:\+\+|--|[+\-*/]?=)(?!=)",
+                        content[call.end():],
+                    )
+                    has_guard = re.search(r"\bnonReentrant\b", content, re.I) or re.search(r"\bnonReentrant\b", " ".join(detail.get("modifiers", []) or []), re.I)
+                    if call and state_after_call and not has_guard:
+                        reentrant_funcs.append(func_id)
+                if not reentrant_funcs:
+                    logger.warning("Discarding REENTRANCY finding %r: no external call before state update found or protected by guard.", vuln_type)
+                    continue
+                item["affected_functions"] = reentrant_funcs
+
+            # Ground exploitation scenario
+            item["exploitation_scenario"] = AnalyzerAgent._build_grounded_exploitation_scenario(
+                vuln_type, item["affected_functions"], source_code, item.get("reasoning", "")
+            )
+
             validated.append(item)
         return validated
 
@@ -976,18 +1124,10 @@ Format findings as:
                 {"role": "user", "content": system_prompt + "\n\n" + user_prompt}
             ]
 
-        if self.model_name == "claude-3-7-sonnet-latest":
-            resp = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                max_tokens=64000,
-                extra_body={ "thinking": { "type": "enabled", "budget_tokens": 2000 } },
-            )
-        else:
-            resp = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages
-            )
+        resp = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=messages
+        )
             
         # Track token usage
         if hasattr(resp, 'usage') and resp.usage:

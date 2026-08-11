@@ -162,7 +162,7 @@ const ProjectContextPanel = ({ contextData }) => {
   const tabs = [
     { id: 'insights', label: 'Insights', icon: '💡', count: insights.length },
     { id: 'dependencies', label: 'Dependencies', icon: '🔄', count: dependencies.length },
-    { id: 'vulnerabilities', label: 'Vulnerabilities', icon: '⚠️', count: vulnerabilities.length },
+    { id: 'vulnerabilities', label: 'Context Risk Flags', icon: '⚠️', count: vulnerabilities.length },
     { id: 'recommendations', label: 'Recommendations', icon: '✅', count: recommendations.length },
     { id: 'functions', label: 'Key Functions', icon: '🔑', count: important_functions.length },
     { id: 'diagram', label: 'Contract Diagram', icon: '📊', count: '' },
@@ -188,7 +188,7 @@ const ProjectContextPanel = ({ contextData }) => {
           <div className="text-xl font-semibold">{stats.total_relationships || dependencies.length || 0}</div>
         </div>
         <div className="bg-red-50 p-3 rounded-md border border-red-100">
-          <div className="text-sm text-red-700">Vulnerabilities</div>
+          <div className="text-sm text-red-700">Context Risk Flags</div>
           <div className="text-xl font-semibold">{stats.total_vulnerabilities || vulnerabilities.length || 0}</div>
         </div>
         <div className="bg-purple-50 p-3 rounded-md border border-purple-100">

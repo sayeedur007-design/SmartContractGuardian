@@ -23,8 +23,9 @@ class ModelConfig:
         export_markdown: bool = False,
         poc_generation_attempts: int = 3,
         poc_max_retries: int = 3,
-        forge_build_timeout: int = 120,
-        forge_test_timeout: int = 180,
+        forge_build_timeout: int = 30,
+        forge_test_timeout: int = 30,
+        ollama_request_timeout: int = 60,
     ):
         self.analyzer_model = "qwen2.5-coder:7b" if analyzer_model == "ollama" else analyzer_model
         self.skeptic_model = "qwen2.5-coder:7b" if skeptic_model == "ollama" else skeptic_model
@@ -38,45 +39,18 @@ class ModelConfig:
         self.poc_max_retries = max(0, poc_max_retries)
         self.forge_build_timeout = max(1, forge_build_timeout)
         self.forge_test_timeout = max(1, forge_test_timeout)
+        self.ollama_request_timeout = max(10, ollama_request_timeout)
 
         self.is_reasoning_model = {
             "qwen2.5-coder:7b": False,
-
-            # OpenAI
-            "o1-mini": True,
-            "o3-mini": True,
-            "gpt-4o": False,
-
-            # Anthropic
-            "claude-3-5-haiku-latest": False,
-            "claude-3-7-sonnet-latest": False,
-
-            # DeepSeek
-            "deepseek-chat": False,
-            "deepseek-reasoner": True,
         }
 
         self.model_provider = {
-            "qwen2.5-coder:7b": "openai",
-
-            # OpenAI
-            "o1-mini": "openai",
-            "o3-mini": "openai",
-            "gpt-4o": "openai",
-
-            # Anthropic
-            "claude-3-5-haiku-latest": "anthropic",
-            "claude-3-7-sonnet-latest": "anthropic",
-
-            # DeepSeek
-            "deepseek-chat": "deepseek",
-            "deepseek-reasoner": "deepseek",
+            "qwen2.5-coder:7b": "ollama",
         }
 
         self.provider_urls = {
-            "openai": "http://localhost:11434/v1",
-            "anthropic": "https://api.anthropic.com/v1/",
-            "deepseek": "https://api.deepseek.com",
+            "ollama": "http://localhost:11434",
         }
 
     def get_model(self, agent_type: str) -> str:
@@ -96,27 +70,13 @@ class ModelConfig:
         return self.is_reasoning_model.get(model_name, False)
 
     def get_provider_info(self, model_name: str) -> Tuple[str, str, str]:
-        provider = self.model_provider.get(model_name, "openai")
-
-        if provider == "anthropic":
-            api_key_env = "ANTHROPIC_API_KEY"
-        elif provider == "deepseek":
-            api_key_env = "DEEPSEEK_API_KEY"
-        else:
-            api_key_env = "OPENAI_API_KEY"
-
-        base_url = self.base_url if self.base_url else self.provider_urls.get(provider)
-
+        provider = "ollama"
+        api_key_env = ""
+        base_url = self.base_url if self.base_url else "http://localhost:11434"
         return provider, api_key_env, base_url
 
     def get_openai_args(self, model_name: str = None) -> Dict:
-        args = {}
-
-        if model_name:
-            _, _, provider_base_url = self.get_provider_info(model_name)
-            if provider_base_url:
-                args["base_url"] = provider_base_url
-        elif self.base_url:
-            args["base_url"] = self.base_url
-
+        args = {"base_url": self.base_url or "http://localhost:11434"}
+        args.update(timeout=self.ollama_request_timeout)
         return args
+
