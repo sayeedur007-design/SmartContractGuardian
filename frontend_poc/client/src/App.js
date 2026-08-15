@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import Header from "./components/Header";
+import AnimatedGearBackground from "./components/AnimatedGearBackground";
 import VulnerabilitiesPage from "./components/VulnerabilitiesPage";
 import SecureGeneratorPage from "./components/SecureGeneratorPage";
 import ContractInput from "./components/ContractInput";
@@ -300,6 +301,7 @@ function App() {
   return (
     <Router>
       <div className="app-shell min-h-screen">
+        <AnimatedGearBackground />
         <Header />
 
         <main className="container mx-auto px-4 md:px-6 max-w-7xl">
