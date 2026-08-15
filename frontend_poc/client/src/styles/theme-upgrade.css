@@ -1,0 +1,495 @@
+/* ============================================================
+   theme-upgrade.css
+   Presentation-only polish layer for SmartGuard AI.
+   Loaded AFTER App.css so it wins equal-specificity ties.
+
+   NOTHING here changes application logic, data, API calls,
+   routes, or markup semantics. It only restyles existing
+   elements and adds subtle, GPU-friendly motion.
+   ============================================================ */
+
+:root {
+  --sg-panel-bg: linear-gradient(150deg, rgba(17, 28, 46, 0.92), rgba(8, 17, 31, 0.94));
+  --sg-panel-border: rgba(71, 138, 196, 0.28);
+  --sg-panel-border-strong: rgba(0, 190, 255, 0.55);
+  --sg-strip-bg: rgba(255, 255, 255, 0.035);
+  --sg-strip-border: rgba(71, 138, 196, 0.22);
+  --sg-text: #cdd9ea;
+  --sg-text-strong: #f6fbff;
+  --sg-text-muted: #94a3b8;
+  --sg-cyan: #22d3ee;
+  --sg-blue: #38bdf8;
+  --sg-green: #4ade80;
+  --sg-amber: #fbbf24;
+  --sg-red: #ff8b9d;
+  --sg-purple: #a78bfa;
+  --sg-shadow: 0 18px 44px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(121, 204, 255, 0.06);
+  --sg-shadow-strong: 0 24px 58px rgba(0, 0, 0, 0.42), 0 0 26px rgba(0, 190, 255, 0.1);
+}
+
+/* ============================================================
+   1. REPORT / ANALYSIS PANELS  → dark cyber system
+   These components (AgentVisualizer, VulnerabilitiesPanel,
+   ExploitsPanel, ProjectContextPanel, PerformanceMetricsPanel,
+   ErrorBoundary) were built with light Tailwind utilities.
+   We restyle them in-place, scoped under .report-panel.
+   ============================================================ */
+
+section.report-panel,
+div.report-panel {
+  position: relative;
+  color: var(--sg-text);
+  background: var(--sg-panel-bg) !important;
+  border: 1px solid var(--sg-panel-border);
+  border-radius: 20px;
+  box-shadow: var(--sg-shadow);
+  backdrop-filter: blur(14px);
+  transition: border-color 220ms ease, box-shadow 220ms ease, transform 220ms ease;
+  animation: sgPanelIn 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+section.report-panel:hover,
+div.report-panel:hover {
+  border-color: var(--sg-panel-border-strong);
+  box-shadow: var(--sg-shadow-strong);
+}
+
+/* subtle top accent line */
+.report-panel::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: 20px 20px 0 0;
+  background: linear-gradient(90deg, transparent, rgba(0, 200, 255, 0.55), rgba(139, 92, 246, 0.4), transparent);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* Headings inside panels */
+.report-panel h2,
+.report-panel h3,
+.report-panel h4 {
+  color: var(--sg-text-strong);
+}
+.report-panel h2 {
+  font-family: "Space Grotesk", Inter, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+/* ---- Backgrounds ---- */
+.report-panel .bg-white { background: transparent !important; }
+.report-panel .bg-gray-50 {
+  background: var(--sg-strip-bg) !important;
+  border-color: var(--sg-strip-border) !important;
+}
+.report-panel .bg-gray-100 { background: rgba(255, 255, 255, 0.05) !important; color: var(--sg-text) !important; }
+.report-panel .bg-gray-200 { background: #08111f !important; }
+.report-panel .bg-gray-300 { background: rgba(148, 163, 184, 0.28) !important; color: var(--sg-text-muted) !important; }
+
+.report-panel .bg-blue-50 { background: rgba(30, 144, 255, 0.16) !important; }
+.report-panel .bg-green-50 { background: rgba(34, 197, 94, 0.12) !important; }
+.report-panel .bg-red-50 { background: rgba(239, 68, 68, 0.12) !important; }
+.report-panel .bg-purple-50 { background: rgba(139, 92, 246, 0.14) !important; }
+.report-panel .bg-indigo-50 { background: rgba(56, 132, 255, 0.12) !important; }
+
+/* Small pill / badge backgrounds */
+.report-panel .bg-red-100 { background: rgba(239, 68, 68, 0.16) !important; }
+.report-panel .bg-green-100 { background: rgba(34, 197, 94, 0.16) !important; }
+.report-panel .bg-yellow-100 { background: rgba(250, 204, 21, 0.16) !important; }
+.report-panel .bg-blue-100 { background: rgba(56, 132, 255, 0.18) !important; }
+.report-panel .bg-purple-100 { background: rgba(139, 92, 246, 0.18) !important; }
+.report-panel .bg-indigo-100 { background: rgba(56, 132, 255, 0.14) !important; }
+
+/* Stat cards in ProjectContextPanel */
+.report-panel .border-blue-100 { border-color: rgba(56, 132, 255, 0.4) !important; }
+.report-panel .border-green-100 { border-color: rgba(34, 197, 94, 0.4) !important; }
+.report-panel .border-red-100 { border-color: rgba(239, 68, 68, 0.4) !important; }
+.report-panel .border-purple-100 { border-color: rgba(139, 92, 246, 0.4) !important; }
+.report-panel .border-indigo-100,
+.report-panel .border-indigo-200 { border-color: rgba(56, 132, 255, 0.35) !important; }
+
+/* ---- Text colors ---- */
+.report-panel .text-gray-800 { color: var(--sg-text-strong) !important; }
+.report-panel .text-gray-700 { color: #dbe6f4 !important; }
+.report-panel .text-gray-600 { color: #b8c7d9 !important; }
+.report-panel .text-gray-500 { color: var(--sg-text-muted) !important; }
+
+.report-panel .text-blue-600,
+.report-panel .text-blue-700 { color: var(--sg-blue) !important; }
+.report-panel .text-blue-800 { color: #bfe0ff !important; }
+.report-panel .text-green-600,
+.report-panel .text-green-700 { color: var(--sg-green) !important; }
+.report-panel .text-green-800 { color: #bbf7d0 !important; }
+.report-panel .text-red-600,
+.report-panel .text-red-700,
+.report-panel .text-red-800 { color: var(--sg-red) !important; }
+.report-panel .text-yellow-800 { color: var(--sg-amber) !important; }
+.report-panel .text-purple-700 { color: var(--sg-purple) !important; }
+.report-panel .text-indigo-500,
+.report-panel .text-indigo-600,
+.report-panel .text-indigo-700,
+.report-panel .text-indigo-800 { color: var(--sg-cyan) !important; }
+
+/* ---- Borders & dividers ---- */
+.report-panel .border,
+.report-panel .border-b,
+.report-panel .border-t,
+.report-panel .border-gray-100,
+.report-panel .border-gray-200,
+.report-panel .border-red-200,
+.report-panel .border-blue-200,
+.report-panel .border-green-200 { border-color: var(--sg-panel-border) !important; }
+
+.report-panel .border-red-300 { border-color: rgba(239, 68, 68, 0.5) !important; }
+.report-panel .border-yellow-300 { border-color: rgba(250, 204, 21, 0.5) !important; }
+.report-panel .border-green-300 { border-color: rgba(34, 197, 94, 0.5) !important; }
+
+.report-panel .divide-y > :not([hidden]) ~ :not([hidden]) { border-color: var(--sg-strip-border) !important; }
+
+/* Active tab underline */
+.report-panel .border-blue-500 { border-color: var(--sg-cyan) !important; }
+
+/* ---- Shadows / elevation ---- */
+.report-panel .shadow-md,
+.report-panel .shadow-lg { box-shadow: none !important; }
+
+/* ---- Progress bar (AgentVisualizer) glow ---- */
+.report-panel .from-blue-400 { --tw-gradient-from: #1e90ff !important; }
+.report-panel .to-blue-600 { --tw-gradient-to: #00d4ff !important; }
+.report-panel .from-green-400 { --tw-gradient-from: #22c55e !important; }
+.report-panel .to-green-600 { --tw-gradient-to: #16a34a !important; }
+.report-panel .bg-blue-500 { background: linear-gradient(120deg, #1e90ff, #00d4ff) !important; box-shadow: 0 0 12px rgba(0, 212, 255, 0.5); }
+.report-panel .bg-green-500,
+.report-panel .bg-green-600 { background: linear-gradient(120deg, #22c55e, #16a34a) !important; }
+.report-panel .bg-red-600 { background: linear-gradient(120deg, #ef4444, #f87171) !important; }
+.report-panel .bg-yellow-500 { background: linear-gradient(120deg, #eab308, #facc15) !important; }
+.report-panel .border-blue-500.bg-blue-500,
+.report-panel .text-white { color: #f6fbff !important; }
+
+/* ---- Hover states ---- */
+.report-panel .hover\:bg-gray-50:hover { background: rgba(255, 255, 255, 0.05) !important; }
+.report-panel .hover\:bg-blue-50:hover { background: rgba(30, 144, 255, 0.14) !important; }
+.report-panel .hover\:bg-indigo-100:hover { background: rgba(56, 132, 255, 0.16) !important; }
+.report-panel .hover\:bg-blue-200:hover { background: rgba(56, 132, 255, 0.28) !important; }
+.report-panel .hover\:bg-purple-200:hover { background: rgba(139, 92, 246, 0.28) !important; }
+.report-panel .hover\:shadow-lg:hover { box-shadow: var(--sg-shadow-strong) !important; }
+.report-panel .hover\:border-gray-300:hover { border-color: var(--sg-panel-border-strong) !important; }
+.report-panel .hover\:text-gray-700:hover { color: var(--sg-text-strong) !important; }
+
+/* Rounded list rows read better with a hairline */
+.report-panel .rounded-md,
+.report-panel .rounded-lg,
+.report-panel .rounded-full { border-radius: 12px; }
+.report-panel .rounded-full { border-radius: 999px; }
+
+/* Tables (PerformanceMetricsPanel) */
+.report-panel table { border-collapse: separate; border-spacing: 0; }
+.report-panel thead tr { background: var(--sg-strip-bg) !important; }
+.report-panel th { color: var(--sg-text-muted) !important; font-weight: 600; letter-spacing: 0.02em; }
+.report-panel td { color: var(--sg-text) !important; }
+.report-panel tbody tr { transition: background-color 140ms ease; }
+.report-panel tbody tr:hover { background: rgba(255, 255, 255, 0.03) !important; }
+
+/* Preformatted output blocks */
+.report-panel pre {
+  border: 1px solid var(--sg-panel-border);
+  background: #071323 !important;
+  color: #a7f3d0 !important;
+}
+
+/* Interactive rows lift slightly */
+.report-panel .cursor-pointer { transition: background-color 160ms ease, transform 160ms ease; }
+
+/* Error / alert action button (ErrorBoundary + App.js retry) */
+.report-panel .bg-red-700 {
+  background: linear-gradient(120deg, #b91c1c, #ef4444) !important;
+  color: #fff5f5 !important;
+  border: 1px solid rgba(239, 68, 68, 0.6);
+  box-shadow: 0 8px 20px rgba(239, 68, 68, 0.25);
+  transition: transform 160ms ease, filter 160ms ease;
+}
+.report-panel .bg-red-700:hover { transform: translateY(-1px); filter: brightness(1.08); }
+
+/* Alert-flavoured panels get a red accent line instead of cyan */
+.report-panel[role="alert"] { border-color: rgba(239, 68, 68, 0.4); }
+.report-panel[role="alert"]::after {
+  background: linear-gradient(90deg, transparent, rgba(239, 68, 68, 0.6), transparent);
+}
+
+/* Mermaid diagram container legibility on dark */
+.report-panel .mermaid-container svg { max-width: 100%; }
+
+/* Copy buttons in ExploitsPanel */
+.report-panel .bg-blue-100.text-blue-700 {
+  border: 1px solid rgba(56, 132, 255, 0.4);
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+.report-panel .bg-blue-100.text-blue-700:hover { box-shadow: 0 0 14px rgba(0, 200, 255, 0.25); }
+
+/* ============================================================
+   2. HERO ENTRANCE ANIMATIONS
+   ============================================================ */
+.landing-hero .hero-badge,
+.landing-hero h1,
+.landing-hero > p,
+.landing-hero .upload-glass-panel {
+  animation: sgFadeUp 640ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.landing-hero .hero-badge { animation-delay: 40ms; }
+.landing-hero h1 { animation-delay: 130ms; }
+.landing-hero > p { animation-delay: 230ms; }
+.landing-hero .upload-glass-panel { animation-delay: 330ms; }
+
+.landing-hero .hero-badge {
+  position: relative;
+  overflow: hidden;
+}
+.landing-hero .hero-badge::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 30%, rgba(120, 220, 255, 0.35) 50%, transparent 70%);
+  transform: translateX(-120%);
+  animation: sgSheen 5.5s ease-in-out 1.2s infinite;
+}
+
+.landing-hero h1 span {
+  background: linear-gradient(100deg, #14aeff, #6ad6ff, #a78bfa);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ============================================================
+   3. HEADER SCROLL STATE + MICRO-INTERACTIONS
+   ============================================================ */
+.site-header {
+  transition: background-color 260ms ease, box-shadow 260ms ease, border-color 260ms ease;
+}
+.site-header.is-scrolled {
+  background: rgba(1, 9, 20, 0.92);
+  border-bottom-color: rgba(0, 190, 255, 0.35);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 1px 0 rgba(0, 190, 255, 0.12);
+}
+
+.brand-logo { transition: transform 260ms ease, filter 260ms ease; }
+.brand-link:hover .brand-logo {
+  transform: rotate(-6deg) scale(1.05);
+  filter: drop-shadow(0 0 10px rgba(0, 190, 255, 0.45));
+}
+
+.nav-link svg { transition: transform 200ms ease; }
+.nav-link:hover svg,
+.nav-link:focus-visible svg { transform: translateY(-1px) scale(1.08); }
+
+/* Active nav indicator */
+.nav-link.is-active {
+  position: relative;
+  background: rgba(0, 150, 255, 0.14);
+}
+.nav-link.is-active::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -3px;
+  width: 42%;
+  height: 2px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--sg-cyan), transparent);
+  box-shadow: 0 0 10px rgba(0, 200, 255, 0.6);
+  animation: sgIndicator 320ms ease both;
+}
+
+.github-button svg { transition: transform 260ms ease; }
+.github-button:hover svg { transform: rotate(-12deg) scale(1.08); }
+
+/* ============================================================
+   4. BACKGROUND DEPTH  (subtle grid + vignette)
+   Sits behind the animated gears, purely decorative.
+   ============================================================ */
+.gear-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(56, 132, 255, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56, 132, 255, 0.05) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(circle at 50% 32%, black, transparent 78%);
+  mask-image: radial-gradient(circle at 50% 32%, black, transparent 78%);
+  opacity: 0.5;
+  animation: sgGridDrift 42s linear infinite;
+}
+.gear-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(circle at 50% 20%, transparent 40%, rgba(2, 8, 20, 0.55) 100%);
+}
+
+/* ============================================================
+   5. UPLOAD / LOADING MICRO-INTERACTIONS
+   ============================================================ */
+.upload-dropzone {
+  position: relative;
+}
+.upload-dropzone.is-dragging {
+  animation: sgDropPulse 1.3s ease-in-out infinite;
+}
+.upload-dropzone .upload-icon { transition: transform 260ms ease, color 260ms ease; }
+.upload-dropzone:hover .upload-icon,
+.upload-dropzone.is-dragging .upload-icon {
+  transform: translateY(-4px) scale(1.04);
+  color: #2bc4ff;
+}
+
+/* Selected-file chip */
+.upload-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.85rem !important;
+  border: 1px solid rgba(0, 200, 255, 0.45);
+  border-radius: 999px;
+  background: rgba(0, 130, 220, 0.12);
+  box-shadow: inset 0 0 16px rgba(0, 190, 255, 0.08);
+  animation: sgFadeUp 320ms ease both;
+}
+
+/* Polished selected-file preview card */
+.upload-file-preview {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  width: min(100%, 420px);
+  margin-top: 1.4rem;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid rgba(0, 200, 255, 0.5);
+  border-radius: 14px;
+  background: linear-gradient(120deg, rgba(0, 120, 210, 0.16), rgba(2, 20, 40, 0.55));
+  box-shadow: inset 0 0 20px rgba(0, 190, 255, 0.08), 0 10px 26px rgba(0, 0, 0, 0.28);
+  text-align: left;
+  cursor: default;
+  animation: sgFadeUp 340ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.upload-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 10px;
+  color: #22d3ee;
+  background: rgba(0, 190, 255, 0.14);
+  border: 1px solid rgba(0, 200, 255, 0.35);
+}
+.upload-file-meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.upload-file-name {
+  color: #f6fbff;
+  font-weight: 700;
+  font-size: 0.95rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.upload-file-sub { margin-top: 0.15rem; color: #9fb6d1; font-size: 0.78rem; }
+.upload-file-ready {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  color: #7ef0c8;
+  background: rgba(34, 197, 94, 0.14);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.upload-file-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 9px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+.upload-file-remove:hover {
+  color: #ff8b9d;
+  border-color: rgba(239, 68, 68, 0.55);
+  background: rgba(239, 68, 68, 0.1);
+  transform: translateY(-1px);
+}
+@media (max-width: 680px) {
+  .upload-file-preview { width: 100%; }
+  .upload-file-ready { display: none; }
+}
+
+/* Analyze button subtle shimmer while enabled */
+.start-analysis-button:not(:disabled) { position: relative; overflow: hidden; }
+.start-analysis-button:not(:disabled)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 35%, rgba(255, 255, 255, 0.18) 50%, transparent 65%);
+  transform: translateX(-130%);
+  animation: sgSheen 4.5s ease-in-out 1s infinite;
+}
+
+/* ============================================================
+   KEYFRAMES
+   ============================================================ */
+@keyframes sgPanelIn {
+  from { opacity: 0; transform: translateY(14px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes sgFadeUp {
+  from { opacity: 0; transform: translateY(18px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes sgSheen {
+  0% { transform: translateX(-130%); }
+  55%, 100% { transform: translateX(130%); }
+}
+@keyframes sgIndicator {
+  from { opacity: 0; width: 0; }
+  to { opacity: 1; width: 42%; }
+}
+@keyframes sgGridDrift {
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 46px 46px, 46px 46px; }
+}
+@keyframes sgDropPulse {
+  0%, 100% { box-shadow: inset 0 0 30px rgba(0, 148, 255, 0.12), 0 0 0 rgba(0, 200, 255, 0); }
+  50% { box-shadow: inset 0 0 40px rgba(0, 190, 255, 0.22), 0 0 24px rgba(0, 190, 255, 0.22); }
+}
+
+/* ============================================================
+   REDUCED MOTION  → disable non-essential animation
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  section.report-panel,
+  div.report-panel,
+  .landing-hero .hero-badge,
+  .landing-hero h1,
+  .landing-hero > p,
+  .landing-hero .upload-glass-panel,
+  .upload-file {
+    animation: none !important;
+  }
+  .landing-hero .hero-badge::after,
+  .start-analysis-button::after,
+  .gear-grid,
+  .upload-dropzone.is-dragging { animation: none !important; }
+}

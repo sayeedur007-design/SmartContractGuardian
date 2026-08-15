@@ -184,7 +184,7 @@ const AgentVisualizer = ({ activeAgent, status, completedAgents = [], agentDetai
   });
 
   return (
-    <div className="bg-white p-6 rounded-lg shadow-md">
+    <div className="report-panel bg-white p-6 rounded-lg shadow-md">
       <h2 className="text-xl font-semibold mb-6">Analysis Workflow</h2>
 
       <div className="overflow-hidden">

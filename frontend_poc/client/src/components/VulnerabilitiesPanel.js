@@ -10,7 +10,7 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
 
   if (items.length === 0) {
     return (
-      <div className="bg-white p-6 rounded-lg shadow-md">
+      <div className="report-panel bg-white p-6 rounded-lg shadow-md">
         <h2 className="text-xl font-semibold mb-4">Vulnerabilities</h2>
         <div className="p-4 text-center text-gray-500">
           No vulnerabilities detected
@@ -31,7 +31,7 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
   };
 
   return (
-    <div className="bg-white p-6 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300 border border-gray-100">
+    <div className="report-panel bg-white p-6 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300 border border-gray-100">
       <h2 className="text-xl font-semibold mb-4">Detected Vulnerabilities</h2>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

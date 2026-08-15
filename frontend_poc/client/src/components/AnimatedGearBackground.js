@@ -350,6 +350,10 @@ export default function AnimatedGearBackground() {
 
   return (
     <div className="gear-bg" aria-hidden="true">
+      {/* Depth layers: subtle circuit grid + vignette behind the gears */}
+      <div className="gear-grid" />
+      <div className="gear-vignette" />
+
       {/* ── Gear 1: Left, Orange/Gold ── */}
       <div className="gear-wrap gear-wrap--left" ref={leftRef}>
         <div className="gear-glow-container">

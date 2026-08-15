@@ -18,6 +18,7 @@ import {
   startAnalysis,
 } from "./services/api";
 import "./App.css";
+import "./styles/theme-upgrade.css";
 
 // Initialize socket.io client - make sure port matches your backend
 const socket = io("http://localhost:3000");
@@ -336,7 +337,7 @@ function App() {
                     </div>
                   )}
                   {analysisError && (
-                    <section className="mb-8 bg-red-50 border border-red-200 text-red-800 rounded-lg p-4" role="alert">
+                    <section className="report-panel mb-8 bg-red-50 border border-red-200 text-red-800 rounded-lg p-4" role="alert">
                       <p className="font-medium">Analysis error</p>
                       <p className="text-sm mt-1">{analysisError}</p>
                       {currentJob && <button className="mt-3 px-3 py-2 rounded bg-red-700 text-white" onClick={handleStartAnalysis}>Retry analysis</button>}

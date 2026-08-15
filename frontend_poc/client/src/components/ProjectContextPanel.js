@@ -43,7 +43,7 @@ const ProjectContextPanel = ({ contextData }) => {
   useEffect(() => {
     mermaid.initialize({
       startOnLoad: false,
-      theme: 'default',
+      theme: 'dark',
       securityLevel: 'strict',
       flowchart: {
         htmlLabels: false,
@@ -149,7 +149,7 @@ const ProjectContextPanel = ({ contextData }) => {
 
   if (Object.keys(safeContextData).length === 0) {
     return (
-      <div className="bg-white p-6 rounded-lg shadow-md">
+      <div className="report-panel bg-white p-6 rounded-lg shadow-md">
         <h2 className="text-xl font-semibold mb-4">Project Context Analysis</h2>
         <div className="p-4 text-center text-gray-500">
           No contract relationship data available
@@ -169,7 +169,7 @@ const ProjectContextPanel = ({ contextData }) => {
   ];
   
   return (
-    <div className="bg-white p-6 rounded-lg shadow-md mb-6 border border-gray-100">
+    <div className="report-panel bg-white p-6 rounded-lg shadow-md mb-6 border border-gray-100">
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-semibold">Project Context Analysis</h2>
         <div className="text-sm text-gray-500">

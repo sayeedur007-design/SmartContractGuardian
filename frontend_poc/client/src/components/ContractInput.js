@@ -9,13 +9,29 @@ const featureCards = [
   { icon: FileCode2, title: "Detailed Reports", text: "Comprehensive security reports & recommendations", color: "amber" },
 ];
 
+const formatBytes = (bytes) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+};
+
 const ContractInput = ({ onContractSubmit, onStartAnalysis, isReady, isAnalyzing }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [fileName, setFileName] = useState("");
+  const [fileSize, setFileSize] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [solidityCode, setSolidityCode] = useState("");
   const fileInputRef = useRef(null);
+
+  const clearSelectedFile = (event) => {
+    event?.stopPropagation();
+    setFileName("");
+    setFileSize(0);
+    setUploadError("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
 
   const handleFileUpload = async (file) => {
     if (!file?.name?.toLowerCase().endsWith(".sol")) {
@@ -26,6 +42,7 @@ const ContractInput = ({ onContractSubmit, onStartAnalysis, isReady, isAnalyzing
     setIsUploading(true);
     setUploadError("");
     setFileName(file.name);
+    setFileSize(file.size || 0);
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -36,6 +53,7 @@ const ContractInput = ({ onContractSubmit, onStartAnalysis, isReady, isAnalyzing
       onContractSubmit({ id: response.data.job_id, name: file.name, status: response.data.status });
     } catch (error) {
       setFileName("");
+      setFileSize(0);
       setUploadError(error.response?.data?.error || error.message || "Unable to upload the contract.");
     } finally {
       setIsUploading(false);
@@ -77,7 +95,17 @@ const ContractInput = ({ onContractSubmit, onStartAnalysis, isReady, isAnalyzing
           <p className="upload-action">or click to browse</p>
           <button className="browse-files-button" type="button" onClick={(event) => { event.stopPropagation(); fileInputRef.current?.click(); }}><FolderOpen size={21} /> Browse Files</button>
           <p className="upload-support"><ShieldCheck size={17} /> Supports .sol files up to 50MB</p>
-          {fileName && !isUploading && <p className="upload-file">Selected: {fileName}</p>}
+          {fileName && !isUploading && (
+            <div className="upload-file-preview" onClick={(event) => event.stopPropagation()}>
+              <span className="upload-file-icon"><FileCode2 size={22} /></span>
+              <div className="upload-file-meta">
+                <span className="upload-file-name">{fileName}</span>
+                <span className="upload-file-sub">Solidity contract{fileSize ? ` · ${formatBytes(fileSize)}` : ""}</span>
+              </div>
+              <span className="upload-file-ready"><ShieldCheck size={15} /> Ready</span>
+              <button type="button" className="upload-file-remove" onClick={clearSelectedFile} aria-label="Remove selected file"><Trash2 size={17} /></button>
+            </div>
+          )}
         </div>
         <div className="upload-divider" aria-hidden="true"><span>OR</span></div>
         <div className="paste-code-panel">
