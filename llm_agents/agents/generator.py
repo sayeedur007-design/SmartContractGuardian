@@ -163,19 +163,28 @@ class GeneratorAgent:
         }
 
     def generate_secure_contract(self, source_code: str, vulnerabilities: List[Dict], progress_callback=None) -> str:
-        """Rewrite and security-validate a contract using the configured model."""
+        """Rewrite and security-validate a contract using a controlled multi-repair loop."""
+        max_attempts = getattr(self.model_config, "secure_generation_attempts", 3)
         findings = json.dumps(vulnerabilities, indent=2, default=str)
-        prompt = f"""You are the final secure-contract generation stage of a Solidity security pipeline.
+        failures: List[str] = []
+        candidate_source = ""
+        previous_candidate_source = ""
+
+        for attempt in range(1, max_attempts + 1):
+            if attempt == 1:
+                prompt = f"""You are the final secure-contract generation stage of a Solidity security pipeline.
 
 Act as an experienced Solidity security auditor, not a formatter. Apply the smallest source-level changes needed to eliminate every validated vulnerability. Preserve the exact contract name, pragma version, interfaces, inheritance, events, existing modifiers, storage layout where possible, function signatures, and external interface. Do not add unrelated functionality or remove legitimate behavior.
 
-SECURITY REQUIREMENTS:
-- Reentrancy: use checks-effects-interactions. Never make an external value call before its state effects. Use OpenZeppelin ReentrancyGuard only when its import is already available; otherwise use a minimal local guard only when needed.
+CRITICAL REENTRANCY AND SECURITY RULES:
+- Reentrancy (CEI Pattern): In functions with state updates and external calls (e.g. `withdraw(uint256)`), move all state updates (e.g. `balances[msg.sender] -= amount;`) BEFORE external calls (e.g. `(bool success,) = msg.sender.call{{value: amount}}("");`). Follow Checks -> Effects -> Interactions strictly.
+- Reentrancy Guard: Use OpenZeppelin ReentrancyGuard only when its import is already available; otherwise use a minimal local private guard if needed (e.g., `bool private _locked;`). State variables for local guards must be `private` or `internal`, NOT `public`.
 - Access control: retain intended authorization, protect privileged operations, validate ownership/role changes, and reject zero-address owners where applicable. Do not create privilege escalation paths.
 - Arithmetic: rely on Solidity 0.8+ checked arithmetic and do not use unchecked blocks unless they are demonstrably safe and documented in code.
 - Randomness: never present block.timestamp, block.number, blockhash, block.prevrandao, block.difficulty, msg.sender, msg.sig, tx.origin, or deterministic hashing as secure randomness. When external infrastructure is unavailable, preserve the interface with a deterministic helper and include exactly this comment: "For production-grade randomness, integrate Chainlink VRF or a commit-reveal protocol."
-- Calls: check low-level call return values and revert on failure. Do not introduce delegatecall, tx.origin, unsafe selfdestruct, or unbounded recipient-processing loops.
+- Calls: check low-level call return values and revert on failure (e.g., `(bool success,) = target.call{{value: amount}}(""); require(success, "Transfer failed");`). Do not introduce delegatecall, tx.origin, unsafe selfdestruct, or unbounded recipient-processing loops.
 - Inputs: validate security-critical external inputs and preserve existing meaningful validation.
+- Interface Integrity: Do NOT add new `public` or `external` functions or `public` state variables that create extra public function signatures.
 
 The output will be rejected if the reported vulnerability remains, if it introduces any of the unsafe patterns above, or if it contains TODOs, placeholders, markdown, or prose.
 
@@ -186,22 +195,33 @@ CONTRACT SOURCE:
 {source_code}
 
 Return only the complete Solidity source code. Do not include markdown or an explanation."""
-        if progress_callback:
-            progress_callback("secure_generation", "Generating secure Solidity", "The local model is rewriting vulnerable logic while preserving the contract interface.")
-        raw_response = self._chat(prompt)
-        generated = self._normalize_generated_solidity(self._clean_solidity(raw_response))
-        if progress_callback:
-            progress_callback("generated_validation", "Validating generated code", "Checking the generated Solidity for security regressions and interface changes.")
-        report = self._security_validation_report(generated, vulnerabilities, source_code)
-        quality = self._generation_quality_report(source_code, generated)
-        failures = report["blocking"] + quality["blocking"]
-        if not failures:
-            self._record_secure_generation_warnings(report["warnings"] + quality["warnings"])
-            return generated
+                if progress_callback:
+                    progress_callback("secure_generation", "Generating secure Solidity", "The local model is rewriting vulnerable logic while preserving the contract interface.")
+                print("[Generator] Initial candidate generation started...")
+                raw_response = self._chat(prompt)
+                candidate_source = self._normalize_generated_solidity(self._clean_solidity(raw_response))
+                print(f"[Generator] Initial candidate generated (length: {len(candidate_source)} chars).")
+            else:
+                unchanged_warning = ""
+                if candidate_source == previous_candidate_source:
+                    print_warning(f"[Repair] Attempt {attempt - 1} produced an unchanged candidate!")
+                    unchanged_warning = "\nIMPORTANT: Your previous repair output was IDENTICAL to the prior candidate and was rejected again. You MUST make a concrete source-level edit changing code ordering (state update BEFORE external call).\n"
 
-        repair_prompt = f"""Repair the generated Solidity contract below. It failed mandatory security validation.
+                repair_prompt = f"""You are repairing an existing Solidity smart contract. It failed mandatory security or compilation validation.
 
-Keep the original contract's interface, events, modifiers, inheritance, and intended behavior. Return a complete replacement Solidity source file only: no markdown, JSON, explanation, TODOs, or placeholders.
+REPAIR ATTEMPT {attempt - 1} OF {max_attempts - 1}:{unchanged_warning}
+Preserve the contract's intended functionality, contract name, events, modifiers, inheritance, and public interface.
+Fix every reported security and compilation issue listed below.
+
+SPECIFIC SECURITY REPAIR GUIDANCE:
+1. Reentrancy / CEI Violation: You MUST change the code ordering so that state updates (e.g. `balances[msg.sender] -= amount;`) occur BEFORE external calls (e.g. `(bool success,) = msg.sender.call{{value: amount}}("");`).
+   DO NOT make external calls before state updates.
+2. Low-Level Call Checks: Always check return values explicitly: `(bool success,) = msg.sender.call{{value: amount}}(""); require(success, "Transfer failed");`.
+3. No Extra Public Functions/Members: Do NOT declare new `public` or `external` functions or `public` state variables. If adding a reentrancy guard variable, use `bool private _locked;` (must be `private` or `internal`, NOT `public`).
+4. Do not remove existing security checks or change unrelated behavior.
+5. Do not merely explain the solution.
+
+Return ONLY the complete replacement Solidity source file: no markdown, JSON, explanation, TODOs, or placeholders.
 
 ORIGINAL CONTRACT:
 {source_code}
@@ -209,27 +229,107 @@ ORIGINAL CONTRACT:
 VALIDATED VULNERABILITIES:
 {findings}
 
-PREVIOUS GENERATED CONTRACT:
-{generated}
+CURRENT GENERATED CONTRACT (FAILED VALIDATION):
+{candidate_source}
 
-SECURITY OR GENERATION-QUALITY FAILURES TO FIX:
+EXACT VALIDATION AND COMPILATION FAILURES TO FIX:
 {chr(10).join(f'- {failure}' for failure in failures)}
 """
-        if progress_callback:
-            progress_callback("repairing_contract", "Repairing generated contract", "The first draft needs a corrective pass before it can be accepted.")
-        repaired = self._normalize_generated_solidity(self._clean_solidity(self._chat(repair_prompt)))
-        if progress_callback:
-            progress_callback("generated_validation", "Revalidating generated code", "Verifying the corrected Solidity contract before compiler validation.")
-        final_report = self._security_validation_report(repaired, vulnerabilities, source_code)
-        final_quality = self._generation_quality_report(source_code, repaired)
-        remaining = final_report["blocking"] + final_quality["blocking"]
-        if remaining:
-            raise ValueError(
-                "Generated contract failed security validation after one repair attempt: "
-                + "; ".join(remaining)
+                if progress_callback:
+                    progress_callback("repairing_contract", f"Repairing generated contract (attempt {attempt - 1}/{max_attempts - 1})", "Applying corrective pass based on exact validation and compiler feedback.")
+                print(f"[Repair] Attempt {attempt - 1}/{max_attempts - 1} started...")
+                previous_candidate_source = candidate_source
+                raw_response = self._chat(repair_prompt)
+                candidate_source = self._normalize_generated_solidity(self._clean_solidity(raw_response))
+                changed = "YES" if candidate_source != previous_candidate_source else "NO (UNCHANGED)"
+                print(f"[Repair] Candidate changed: {changed} (length: {len(candidate_source)} chars).")
+
+            if progress_callback:
+                progress_callback("generated_validation", f"Validating generated code (attempt {attempt}/{max_attempts})", "Checking the generated Solidity for security regressions, compilation errors, and interface changes.")
+
+            report = self._security_validation_report(candidate_source, vulnerabilities, source_code)
+            quality = self._generation_quality_report(source_code, candidate_source)
+            current_failures = report["blocking"] + quality["blocking"]
+
+            if progress_callback:
+                progress_callback("compiler_validation", f"Compiling candidate contract (attempt {attempt}/{max_attempts})", "Verifying Solidity syntax and compiler compatibility.")
+            compile_ok, compile_err = self._compile_secure_solidity(candidate_source)
+            if not compile_ok:
+                current_failures.append(f"Compiler failure: {compile_err}")
+
+            if not current_failures:
+                self._record_secure_generation_warnings(report["warnings"] + quality["warnings"])
+                print_success(f"[Generator] Candidate passed compiler and security validation on attempt {attempt}.")
+                return candidate_source
+
+            failures = current_failures
+            print_warning(f"[Validator] FAILED attempt {attempt}/{max_attempts}: {'; '.join(failures)}")
+
+        raise ValueError(
+            f"Generated contract failed security validation after {max_attempts} repair attempts: "
+            + "; ".join(failures)
+        )
+
+    def _compile_secure_solidity(self, source: str) -> tuple[bool, str]:
+        """Compile candidate secure Solidity using solc or forge.
+
+        Returns (compiled_successfully: bool, error_diagnostic: str).
+        """
+        solc_path = shutil.which("solc")
+        if solc_path:
+            import tempfile
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_file = Path(temp_dir) / "Candidate.sol"
+                    temp_file.write_text(source, encoding="utf-8")
+                    result = subprocess.run(
+                        [solc_path, "--bin", str(temp_file)],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=30,
+                    )
+                    if result.returncode == 0:
+                        return True, ""
+                    error_msg = (result.stderr or result.stdout or "Solidity compilation failed.").strip()
+                    if "@openzeppelin" not in error_msg and "import" not in error_msg.lower():
+                        return False, error_msg
+            except Exception as exc:
+                print_warning(f"Direct solc check failed: {exc}")
+
+        validation_root = self.exploit_root / ".secure_validation" / uuid.uuid4().hex
+        try:
+            (validation_root / "src").mkdir(parents=True, exist_ok=True)
+            lib = self.exploit_root / "lib"
+            if lib.exists():
+                shutil.copytree(lib, validation_root / "lib")
+            (validation_root / "src" / "SecureContract.sol").write_text(source, encoding="utf-8")
+            (validation_root / "foundry.toml").write_text(
+                '[profile.default]\nsrc = "src"\nlibs = ["lib"]\nout = "out"\ncache_path = "cache"\n',
+                encoding="utf-8",
             )
-        self._record_secure_generation_warnings(final_report["warnings"] + final_quality["warnings"])
-        return repaired
+            command = ["forge", "build"]
+            if solc_path:
+                command.extend(["--use", solc_path])
+            result = subprocess.run(
+                command,
+                cwd=validation_root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=self.model_config.forge_build_timeout,
+                env=self._forge_env(),
+            )
+            if result.returncode == 0:
+                return True, ""
+            diag = (result.stderr or result.stdout or "Forge compilation failed.").strip()
+            return False, diag
+        except Exception as exc:
+            return False, f"Compilation error: {exc}"
+        finally:
+            shutil.rmtree(validation_root, ignore_errors=True)
 
     def _record_secure_generation_warnings(self, warnings: List[str]) -> None:
         """Expose non-blocking validation guidance without rejecting a contract."""
@@ -349,6 +449,16 @@ SECURITY OR GENERATION-QUALITY FAILURES TO FIX:
         )
         for signature in sorted(missing_signatures):
             blocking.append(f"High: original function signature {signature} was changed or removed")
+
+        extra_signatures = (
+            GeneratorAgent._normalized_function_signatures(generated)
+            - GeneratorAgent._normalized_function_signatures(original)
+        )
+        for signature in sorted(extra_signatures):
+            name = signature.split("(", 1)[0]
+            if name in {"constructor", "receive", "fallback"}:
+                continue
+            blocking.append(f"High: generated contract introduced unauthorized function signature {signature}")
 
         original_modifiers = set(re.findall(r"\bmodifier\s+([A-Za-z_]\w*)\b", original))
         generated_modifiers = set(re.findall(r"\bmodifier\s+([A-Za-z_]\w*)\b", generated))
@@ -493,7 +603,7 @@ SECURITY OR GENERATION-QUALITY FAILURES TO FIX:
             ):
                 blocking.append("High: generation introduced unsafe randomness")
             elif status == "PARTIALLY IMPROVED":
-                warnings.append("Medium: randomness is partially improved; use VRF or commit-reveal for adversarial fairness")
+                warnings.append("Medium: weak randomness is partially improved; use VRF or commit-reveal for adversarial fairness")
 
         state_write = re.compile(
             r"\b(?!success\b|ok\b|sent\b)[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)*\s*(?:=|\+=|-=|\*=|/=)"
@@ -506,14 +616,22 @@ SECURITY OR GENERATION-QUALITY FAILURES TO FIX:
                     blocking.append(f"High: {name} performs an external call before a state update (CEI violation)")
                     break
             for call in low_level_call.finditer(body):
+                prefix = body[max(0, call.start() - 150):call.start()]
+                suffix = body[call.end():call.end() + 300]
                 assignment = re.search(
-                    r"\(\s*bool\s+([A-Za-z_]\w*)\s*,[^)]*\)\s*=\s*[^;]*$",
-                    body[max(0, call.start() - 240):call.start()], re.S,
+                    r"\b(?:bool\s+([A-Za-z_]\w*)|(?:\(\s*bool\s+([A-Za-z_]\w*)\s*,[^)]*\)))\s*=\s*",
+                    prefix, re.S
                 )
-                checked = assignment and re.search(
-                    rf"\b(?:require|if)\s*\([^)]*\b{re.escape(assignment.group(1))}\b",
-                    body[call.end():call.end() + 300], re.S,
-                )
+                var_name = (assignment.group(1) or assignment.group(2)) if assignment else None
+                checked = False
+                if var_name:
+                    checked = bool(re.search(rf"\b(?:require|if)\s*\([^)]*\b{re.escape(var_name)}\b", suffix, re.S))
+                if not checked:
+                    checked = bool(
+                        re.search(r"^\s*\)?\s*;\s*require\s*\(", suffix)
+                        or re.search(r"\b(?:require|if)\s*\([^)]*$", prefix, re.S)
+                        or re.search(r"\b(?:require|if)\s*\(\s*(?:success|ok|sent|result)\b", suffix, re.S)
+                    )
                 if not checked:
                     blocking.append(f"High: {name} has a low-level call without checked success and revert handling")
                     break

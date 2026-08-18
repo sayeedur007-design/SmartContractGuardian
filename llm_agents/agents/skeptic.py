@@ -259,6 +259,7 @@ Return ONLY valid JSON in this format:
                 # An explicit REJECTED verdict with no independent evidence is removed.
                 continue
 
+            reasoning = cls._ground_execution_order(finding, reasoning, contract_source)
             calibrated = cls._calibrate_confidence(finding, confidence, evidence, contract_source, verdict_name)
             item = dict(finding)
             status = verdict_name if verdict_name in {"VERIFIED", "LIKELY", "NEEDS_REVIEW", "WEAK", "INSUFFICIENT_EVIDENCE"} else "INSUFFICIENT_EVIDENCE"
@@ -493,10 +494,19 @@ Return ONLY valid JSON in this format:
         if "reentrancy" not in str(finding.get("vulnerability_type", "")).lower():
             return reasoning
         snippet = str(finding.get("code_snippet", "")) or contract_source
-        external_call = re.search(r"\.call\s*\{[^}]*value\s*:", snippet, re.I)
-        state_update = re.search(r"(?:balances|\w+)\s*\[[^\]]+\]\s*[-+]?=", snippet)
+        external_call = re.search(
+            r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|call\.value\s*\(|send\s*\(|transfer\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()",
+            snippet, re.I
+        )
+        state_update = re.search(
+            r"\b[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)?\s*(?:\+\+|--|[+\-*/]?=)(?!=)",
+            snippet
+        )
         if external_call and state_update and external_call.start() < state_update.start():
-            contradiction = re.search(r"(?:correctly\s+follows|follows)\s+checks[-\s]?effects[-\s]?interactions", reasoning, re.I)
+            contradiction = re.search(
+                r"(?:correctly\s+follows|follows)\s+checks[-\s]?effects[-\s]?interactions|state\s+change\s+occurs\s+before",
+                reasoning, re.I
+            )
             if contradiction:
                 return (
                     "Source execution order shows an external value call before the state update; "

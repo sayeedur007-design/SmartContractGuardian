@@ -434,6 +434,18 @@ class AnalyzerAgent:
             "Remove selfdestruct or strictly protect it with authorization.",
             operation="selfdestruct",
         )
+        if unprotected_selfdestruct and not any(
+            str(item.get("vulnerability_type", "")).lower() == "dangerous_selfdestruct"
+            for item in findings
+        ):
+            findings.append({
+                "vulnerability_type": "dangerous_selfdestruct", "confidence_score": 0.95,
+                "reasoning": "Deterministic source evidence: selfdestruct is callable without authorization.",
+                "affected_functions": unprotected_selfdestruct, "impact": "High", "severity": "High",
+                "remediation": "Remove selfdestruct or strictly protect it with authorization.",
+                "exploitation_scenario": "Any caller can trigger selfdestruct.",
+                "security_operation": "selfdestruct",
+            })
 
         caller_entitlement_write = [
             detail["function_id"] for detail in details
@@ -524,9 +536,7 @@ class AnalyzerAgent:
              lambda text: re.search(r"block\.timestamp", text)
              and re.search(r"\b(?:random|rand|lottery|raffle|winner)\b|keccak256\s*\(|block\.(?:prevrandao|difficulty|hash)\b|blockhash\s*\(", text, re.I)),
             ("timestamp_dependence", 0.65, "Medium", "Avoid using miner-influenced time in security-sensitive decisions.",
-             lambda text: re.search(r"block\.timestamp", text)
-             and not re.search(r"\b(?:random|rand|lottery|raffle|winner)\b|keccak256\s*\(|block\.(?:prevrandao|difficulty|hash)\b|blockhash\s*\(", text, re.I)
-             and re.search(r"(?:require|if|payout|transfer|call|=)\s*[\s\S]{0,120}block\.timestamp|block\.timestamp[\s\S]{0,120}(?:require|if|payout|transfer|call|=)", text, re.I)),
+             lambda text: re.search(r"block\.timestamp", text)),
             ("integer_overflow", 0.75, "Medium", "Remove unchecked arithmetic or validate bounds before state updates.",
              lambda text: re.search(r"unchecked\s*\{[\s\S]*?(?:\+\+|--|\+=|-=|\*=)", text, re.I)),
             ("denial_of_service", 0.70, "Medium", "Use pull payments or bounded batches for recipient processing.",
@@ -745,8 +755,12 @@ class AnalyzerAgent:
             resolved = cls._normalize_function_reference_for_lookup(
                 value, allowed, function_details, source_code
             )
-            if resolved and resolved not in normalized:
-                normalized.append(resolved)
+            if resolved:
+                if resolved not in normalized:
+                    normalized.append(resolved)
+            elif not allowed or str(value).startswith("0x"):
+                if value not in normalized:
+                    normalized.append(value)
         return normalized
 
     @staticmethod
@@ -835,107 +849,108 @@ class AnalyzerAgent:
                 if fn_detail.get("content"):
                     affected_contents.append((func_id, fn_detail, fn_detail["content"]))
 
-            # 1. TIMESTAMP validation: Must have block.timestamp/derived logic in source & affected function
-            if "timestamp" in vuln_type_lower:
-                if not _has_timestamp:
-                    logger.warning("Discarding TIMESTAMP finding %r: contract has no timestamp logic.", vuln_type)
-                    continue
-                func_has_ts = any(
-                    re.search(r"\b(?:block\.timestamp|now)\b", content)
-                    for _, _, content in affected_contents
-                )
-                if not func_has_ts:
-                    logger.warning("Discarding TIMESTAMP finding %r: affected functions contain no timestamp logic.", vuln_type)
-                    continue
+            if affected_contents:
+                # 1. TIMESTAMP validation: Must have block.timestamp/derived logic in source & affected function
+                if "timestamp" in vuln_type_lower:
+                    if not _has_timestamp:
+                        logger.warning("Discarding TIMESTAMP finding %r: contract has no timestamp logic.", vuln_type)
+                        continue
+                    func_has_ts = any(
+                        re.search(r"\b(?:block\.timestamp|now)\b", content)
+                        for _, _, content in affected_contents
+                    )
+                    if not func_has_ts:
+                        logger.warning("Discarding TIMESTAMP finding %r: affected functions contain no timestamp logic.", vuln_type)
+                        continue
 
-            # 2. ARITHMETIC validation: Must not report standard ^0.8.x arithmetic without unchecked{}
-            if any(marker in vuln_type_lower for marker in ("arithmetic", "overflow", "underflow")):
-                is_vulnerable_arith = False
-                for _, _, content in affected_contents:
-                    if not _legacy_pragma:
-                        # Solidity 0.8+: must be inside an unchecked block
-                        if re.search(r"\bunchecked\s*\{[\s\S]*?(?:\+\+|--|[+\-*]=|\+|\-|\*|/)", content, re.I):
-                            is_vulnerable_arith = True
+                # 2. ARITHMETIC validation: Must not report standard ^0.8.x arithmetic without unchecked{}
+                if any(marker in vuln_type_lower for marker in ("arithmetic", "overflow", "underflow")):
+                    is_vulnerable_arith = False
+                    for _, _, content in affected_contents:
+                        if not _legacy_pragma:
+                            # Solidity 0.8+: must be inside an unchecked block
+                            if re.search(r"\bunchecked\s*\{[\s\S]*?(?:\+\+|--|[+\-*]=|\+|\-|\*|/)", content, re.I):
+                                is_vulnerable_arith = True
+                                break
+                        else:
+                            # Pre-0.8: bare arithmetic without SafeMath
+                            if not re.search(r"\bSafeMath\b", source_code, re.I):
+                                if re.search(r"[+\-*/]=|\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*[-+]", content):
+                                    if not re.search(r"(?:require|assert)\s*\([^;]*\b(?:>=|<=|>|<)\b", content):
+                                        is_vulnerable_arith = True
+                                        break
+                    if not is_vulnerable_arith:
+                        logger.warning("Discarding ARITHMETIC finding %r: checked arithmetic in 0.8+ or safe in pre-0.8.", vuln_type)
+                        continue
+
+                # 3. UNCHECKED_LOW_LEVEL_CALLS validation: Must have a low level call whose return value is un-checked
+                if "unchecked" in vuln_type_lower and "call" in vuln_type_lower:
+                    has_unchecked = False
+                    for _, _, content in affected_contents:
+                        call = re.search(r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|send\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()", content, re.I)
+                        if call:
+                            checked = re.search(
+                                r"\(\s*bool\s+(?:success|ok|sent)\b[^;]*=\s*[^;]*\.(?:call|send|delegatecall)"
+                                r"[\s\S]*?(?:require\s*\(\s*(?:success|ok|sent)\b|if\s*\(\s*!\s*(?:success|ok|sent)\b)",
+                                content, re.I
+                            )
+                            if not checked:
+                                has_unchecked = True
+                                break
+                    if not has_unchecked:
+                        logger.warning("Discarding UNCHECKED_LOW_LEVEL_CALLS finding %r: call return value is explicitly checked.", vuln_type)
+                        continue
+
+                # 4. ACCESS_CONTROL validation: Must be an un-guarded privileged function
+                if "access" in vuln_type_lower and "control" in vuln_type_lower:
+                    valid_access = False
+                    for _, detail, content in affected_contents:
+                        vis = str(detail.get("visibility", "")).lower()
+                        if vis not in {"public", "external"}:
+                            continue
+                        mods = " ".join(detail.get("modifiers", []) or [])
+                        protected = bool(re.search(
+                            r"(?:only(?:owner|admin|role)|auth|authorized|admin|role)", mods, re.I
+                        ) or re.search(
+                            r"(?:onlyOwner|onlyRole|hasRole|_checkRole|require\s*\([^;]*(?:msg\.sender\s*==|hasRole)|if\s*\([^)]*(?:msg\.sender\s*!=|!hasRole))",
+                            content, re.I
+                        ))
+                        privileged_action = bool(re.search(
+                            r"\bselfdestruct\s*\(|\b(?:owner|admin)\s*=|"
+                            r"\b(?:reward|credit)\s*\[\s*msg\.sender\s*\]\s*\+=|"
+                            r"address\s*\(\s*this\s*\)\.balance|"
+                            r"\btx\.origin\b",
+                            content, re.I
+                        ))
+                        if privileged_action and not protected:
+                            valid_access = True
                             break
-                    else:
-                        # Pre-0.8: bare arithmetic without SafeMath
-                        if not re.search(r"\bSafeMath\b", source_code, re.I):
-                            if re.search(r"[+\-*/]=|\b[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*[-+]", content):
-                                if not re.search(r"(?:require|assert)\s*\([^;]*\b(?:>=|<=|>|<)\b", content):
-                                    is_vulnerable_arith = True
-                                    break
-                if not is_vulnerable_arith:
-                    logger.warning("Discarding ARITHMETIC finding %r: checked arithmetic in 0.8+ or safe in pre-0.8.", vuln_type)
-                    continue
+                        elif not protected and re.search(r"\b(?:set|update|grant|mint|withdraw|destroy)\b", detail.get("function", ""), re.I):
+                            valid_access = True
+                            break
+                    if not valid_access:
+                        logger.warning("Discarding ACCESS_CONTROL finding %r: function is protected or contains no un-guarded privileged write.", vuln_type)
+                        continue
 
-            # 3. UNCHECKED_LOW_LEVEL_CALLS validation: Must have a low level call whose return value is un-checked
-            if "unchecked" in vuln_type_lower and "call" in vuln_type_lower:
-                has_unchecked = False
-                for _, _, content in affected_contents:
-                    call = re.search(r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|send\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()", content, re.I)
-                    if call:
-                        checked = re.search(
-                            r"\(\s*bool\s+(?:success|ok|sent)\b[^;]*=\s*[^;]*\.(?:call|send|delegatecall)"
-                            r"[\s\S]*?(?:require\s*\(\s*(?:success|ok|sent)\b|if\s*\(\s*!\s*(?:success|ok|sent)\b)",
+                # 5. REENTRANCY validation: Must have external call before state update and no nonReentrant guard
+                if "reentrancy" in vuln_type_lower:
+                    reentrant_funcs = []
+                    for func_id, detail, content in affected_contents:
+                        call = re.search(
+                            r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|call\.value\s*\(|send\s*\(|transfer\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()",
                             content, re.I
                         )
-                        if not checked:
-                            has_unchecked = True
-                            break
-                if not has_unchecked:
-                    logger.warning("Discarding UNCHECKED_LOW_LEVEL_CALLS finding %r: call return value is explicitly checked.", vuln_type)
-                    continue
-
-            # 4. ACCESS_CONTROL validation: Must be an un-guarded privileged function
-            if "access" in vuln_type_lower and "control" in vuln_type_lower:
-                valid_access = False
-                for _, detail, content in affected_contents:
-                    vis = str(detail.get("visibility", "")).lower()
-                    if vis not in {"public", "external"}:
+                        state_after_call = call and re.search(
+                            r"\b[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)?\s*(?:\+\+|--|[+\-*/]?=)(?!=)",
+                            content[call.end():],
+                        )
+                        has_guard = re.search(r"\bnonReentrant\b", content, re.I) or re.search(r"\bnonReentrant\b", " ".join(detail.get("modifiers", []) or []), re.I)
+                        if call and state_after_call and not has_guard:
+                            reentrant_funcs.append(func_id)
+                    if not reentrant_funcs:
+                        logger.warning("Discarding REENTRANCY finding %r: no external call before state update found or protected by guard.", vuln_type)
                         continue
-                    mods = " ".join(detail.get("modifiers", []) or [])
-                    protected = bool(re.search(
-                        r"(?:only(?:owner|admin|role)|auth|authorized|admin|role)", mods, re.I
-                    ) or re.search(
-                        r"(?:onlyOwner|onlyRole|hasRole|_checkRole|require\s*\([^;]*(?:msg\.sender\s*==|hasRole)|if\s*\([^)]*(?:msg\.sender\s*!=|!hasRole))",
-                        content, re.I
-                    ))
-                    privileged_action = bool(re.search(
-                        r"\bselfdestruct\s*\(|\b(?:owner|admin)\s*=|"
-                        r"\b(?:reward|credit)\s*\[\s*msg\.sender\s*\]\s*\+=|"
-                        r"address\s*\(\s*this\s*\)\.balance|"
-                        r"\btx\.origin\b",
-                        content, re.I
-                    ))
-                    if privileged_action and not protected:
-                        valid_access = True
-                        break
-                    elif not protected and re.search(r"\b(?:set|update|grant|mint|withdraw|destroy)\b", detail.get("function", ""), re.I):
-                        valid_access = True
-                        break
-                if not valid_access:
-                    logger.warning("Discarding ACCESS_CONTROL finding %r: function is protected or contains no un-guarded privileged write.", vuln_type)
-                    continue
-
-            # 5. REENTRANCY validation: Must have external call before state update and no nonReentrant guard
-            if "reentrancy" in vuln_type_lower:
-                reentrant_funcs = []
-                for func_id, detail, content in affected_contents:
-                    call = re.search(
-                        r"\.(?:call\s*(?:\{[^}]*\}\s*)?\(|call\.value\s*\(|send\s*\(|transfer\s*\(|delegatecall\s*(?:\{[^}]*\}\s*)?\()",
-                        content, re.I
-                    )
-                    state_after_call = call and re.search(
-                        r"\b[A-Za-z_]\w*(?:\s*\[[^\]]+\]|\s*\.\w+)?\s*(?:\+\+|--|[+\-*/]?=)(?!=)",
-                        content[call.end():],
-                    )
-                    has_guard = re.search(r"\bnonReentrant\b", content, re.I) or re.search(r"\bnonReentrant\b", " ".join(detail.get("modifiers", []) or []), re.I)
-                    if call and state_after_call and not has_guard:
-                        reentrant_funcs.append(func_id)
-                if not reentrant_funcs:
-                    logger.warning("Discarding REENTRANCY finding %r: no external call before state update found or protected by guard.", vuln_type)
-                    continue
-                item["affected_functions"] = reentrant_funcs
+                    item["affected_functions"] = reentrant_funcs
 
             # Ground exploitation scenario
             item["exploitation_scenario"] = AnalyzerAgent._build_grounded_exploitation_scenario(

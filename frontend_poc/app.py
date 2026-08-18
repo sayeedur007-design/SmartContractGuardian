@@ -218,12 +218,12 @@ def _run_secure_generation(generation_id):
 
         output_filename = f'{generation_id}_secure_{filename}'
         output_path = os.path.join(SECURE_CONTRACT_FOLDER, output_filename)
-        _secure_generation_event(generation_id, 'compiler_validation', 'active', 'Compiling generated contract', 'Verifying Solidity syntax and compiler compatibility.')
         with open(output_path, 'w', encoding='utf-8', newline='\n') as output_file:
             output_file.write(generated_source)
         compile_status, compile_error = _compile_secure_contract(output_path)
         if compile_status == 'Failed':
-            os.remove(output_path)
+            if os.path.exists(output_path):
+                os.remove(output_path)
             raise ValueError(f'Generated contract did not compile: {compile_error}')
         _secure_generation_event(generation_id, 'compiler_validation', 'complete', 'Compilation passed', 'The generated Solidity contract compiled successfully.')
 
@@ -231,7 +231,8 @@ def _run_secure_generation(generation_id):
         try:
             analyze_contract(output_path)
         except Exception as validation_error:
-            os.remove(output_path)
+            if os.path.exists(output_path):
+                os.remove(output_path)
             raise ValueError(f'Generated contract failed Slither validation: {validation_error}') from validation_error
         _secure_generation_event(generation_id, 'security_validation', 'complete', 'Security validation passed', 'Final static security validation completed successfully.')
         _secure_generation_event(generation_id, 'finalizing_output', 'active', 'Finalizing secure output', 'Preparing the validated secure contract for download.')
