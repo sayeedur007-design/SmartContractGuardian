@@ -56,6 +56,26 @@ def serve(path):
     else:
         return send_from_directory(app.static_folder, 'index.html')
 
+
+_SOLIDITY_FENCE = re.compile(
+    r"^[ \t\r\n]*```(?P<language>solidity|sol)?[ \t]*\r?\n"
+    r"(?P<body>[\s\S]*?)\r?\n?[ \t]*```[ \t\r\n]*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_uploaded_solidity(source):
+    """Remove only transport wrappers that make otherwise-valid Solidity invalid."""
+    # A BOM is not Solidity source.  Keep leading whitespace so diagnostics for
+    # genuinely invalid source still refer to its original line layout.
+    source = re.sub(r"^([ \t\r\n]*)\ufeff", r"\1", source, count=1)
+    fenced = _SOLIDITY_FENCE.fullmatch(source)
+    if fenced:
+        source = fenced.group('body')
+        source = re.sub(r"^([ \t\r\n]*)\ufeff", r"\1", source, count=1)
+    return source
+
+
 @app.route('/api/upload-contract', methods=['POST'])
 def upload_contract():
     if 'file' not in request.files:
@@ -70,12 +90,19 @@ def upload_contract():
     if not filename or not filename.lower().endswith('.sol'):
         return jsonify({'error': 'Please upload a Solidity (.sol) file'}), 400
     file_path = os.path.join(UPLOAD_FOLDER, f"{job_id}_{filename}")
-    file.save(file_path)
+    try:
+        original_source = file.read().decode('utf-8')
+    except UnicodeDecodeError:
+        return jsonify({'error': 'Solidity source must be UTF-8 encoded'}), 400
+    normalized_source = _normalize_uploaded_solidity(original_source)
+    with open(file_path, 'w', encoding='utf-8', newline='') as uploaded_file:
+        uploaded_file.write(normalized_source)
 
     jobs[job_id] = {
         'status': 'uploaded',
         'contract_path': file_path,
-        'filename': filename
+        'filename': filename,
+        'original_source': original_source,
     }
 
     return jsonify({
@@ -1100,6 +1127,13 @@ library TokenHelper {
         print(f"Created base test file at {abs_filename}")
         return abs_filename
 
+    # The shared generator and runner compile isolated Foundry projects and
+    # consistently read this helper from ``exploit/test``.  The old frontend
+    # override used ``exploit/src/test``, making generated candidates fail
+    # before Forge could execute them.
+    def generate_basetest_file(self) -> str:
+        return super().generate_basetest_file()
+
 # Modified version of ExploitRunner for the frontend
 class FrontendExploitRunner(ExploitRunner):
     # The shared runner captures complete diagnostics and uses safe repair gating.
@@ -1616,7 +1650,7 @@ class SocketIOAgentCoordinator(AgentCoordinator):
                 })
 
                 # Run and fix the exploit if auto-run is enabled
-                if auto_run_config.get("auto_run", True):
+                if auto_run_config.get("auto_run", True) and poc_data.get("poc_strategy", "executable") in {"executable", "regression"}:
                     # RUNNER AGENT
                     print(f"Emitting agent_active event for runner for job {self.job_id}")
 
@@ -1661,6 +1695,8 @@ class SocketIOAgentCoordinator(AgentCoordinator):
 
                     if runner_state == 'PASSED':
                         status_detail = f'PoC validated successfully on attempt 1' if retries == 0 else f'PoC fixed and validated successfully after {retries} retries'
+                    elif runner_state == 'NOT_DEMONSTRATED':
+                        status_detail = 'Test passed, but the attempted attack did not demonstrate the claimed security impact'
                     elif runner_state == 'TIMEOUT':
                         status_detail = 'PoC execution timed out'
                     elif not run_result.get('compiled'):
@@ -1687,6 +1723,8 @@ class SocketIOAgentCoordinator(AgentCoordinator):
                     # Add execution results to the PoC data
                     poc_data["execution_results"] = {
                         "success": success,
+                        "impact_verified": run_result.get("impact_verified", False),
+                        "lifecycle": run_result.get("lifecycle", {}),
                         "runner_state": runner_state,
                         "retries": retries,
                         "compiled": run_result.get("compiled", False),
@@ -1695,9 +1733,20 @@ class SocketIOAgentCoordinator(AgentCoordinator):
                         "error": run_result.get("error", ""),
                         "output": run_result.get("output", "")[:2000]
                     }
+                elif not poc_data.get("compiled", False):
+                     # Generator already exhausted compilation attempts.  Do
+                     # not label this as an execution failure or send it to
+                     # Runner; compiler artifacts are retained by Generator.
+                     poc_data["execution_results"] = {
+                         "success": False, "compiled": False, "executed": False,
+                         "impact_verified": False, "runner_state": "COMPILATION_FAILED",
+                         "lifecycle": poc_data.get("lifecycle", {}),
+                         "retries": 0, "error": poc_data.get("compile_error", "PoC compilation failed"),
+                         "output": poc_data.get("compile_output", "")[:2000],
+                     }
                 else:
                      # Add placeholder if auto-run is off
-                     poc_data["execution_results"] = { "success": None, "retries": 0, "error": "Auto-run disabled", "output": "" }
+                     poc_data["execution_results"] = { "success": None, "compiled": poc_data.get("compiled", False), "executed": False, "impact_verified": False, "retries": 0, "error": "Auto-run disabled", "output": "" }
 
 
                 generated_pocs.append({
@@ -1927,9 +1976,15 @@ def open_browser():
     print("Opening web interface in browser...")
     webbrowser.open("http://localhost:3000")
 
+
+def _should_open_browser():
+    """Only the reloader parent launches the user's browser."""
+    return os.environ.get('WERKZEUG_RUN_MAIN', '').lower() != 'true'
+
 if __name__ == '__main__':
     import threading
-    threading.Thread(target=open_browser, daemon=True).start()
+    if _should_open_browser():
+        threading.Thread(target=open_browser, daemon=True).start()
     
     # Match the port with your socket in the frontend
     socketio.run(app, debug=True, host='0.0.0.0', port=3000, allow_unsafe_werkzeug=True)

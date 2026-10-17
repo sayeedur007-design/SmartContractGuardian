@@ -1,5 +1,6 @@
 """Reliable Foundry execution and compiler-diagnostic repair loop."""
 import os
+import json
 import re
 import shutil
 import subprocess
@@ -39,6 +40,26 @@ class ExploitRunner:
 
         emit_status("PREPARING", "Preparing isolated test environment")
         path = Path(poc_data.get("exploit_file", ""))
+        # Generator compilation is authoritative for this candidate.  Never
+        # spend another repair/execution cycle on a PoC already marked as
+        # uncompiled; its exact source and compiler streams are retained in
+        # the Generator artifacts.
+        if poc_data.get("compiled") is False:
+            diagnostic = poc_data.get("compile_error") or poc_data.get("generation_error") or "PoC compilation failed."
+            emit_status("COMPILATION_FAILED", diagnostic)
+            return self._result(
+                path if path.is_file() else None,
+                compile_result={
+                    "compiled": False,
+                    "compile_error": diagnostic,
+                    "stdout": poc_data.get("compile_stdout", ""),
+                    "stderr": poc_data.get("compile_stderr", ""),
+                    "output": poc_data.get("compile_output", ""),
+                    "compile_time": poc_data.get("compile_time", 0.0),
+                },
+                error=diagnostic,
+                runner_state="COMPILATION_FAILED",
+            )
         if not path.is_file():
             emit_status("ERROR", "Exploit file not found")
             return self._result(error=poc_data.get("generation_error", "Exploit file not found"), runner_state="ERROR")
@@ -73,8 +94,35 @@ class ExploitRunner:
                     self._cleanup_job_workspace(path)
                     return result
 
+                # A regression PoC documents a non-exploitable or rollback
+                # path.  If its own assertion fails, retain that Forge result
+                # instead of spending LLM repair retries trying to turn it
+                # into an executable exploit.
+                if poc_data.get("poc_strategy") == "regression" and not last_execution["success"]:
+                    final_state = "TEST_FAILED"
+                    emit_status("TEST_FAILED", last_execution["runtime_error"])
+                    result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution,
+                                          runner_state="TEST_FAILED")
+                    self._cleanup_job_workspace(path)
+                    return result
+
                 emit_status("VALIDATING", f"Validating exploit result (attempt {attempt + 1})")
-                if last_execution["success"]:
+                if poc_data.get("poc_strategy") == "regression" and last_execution["success"]:
+                    last_execution["impact_verified"] = False
+                    last_execution["runtime_error"] = (
+                        "Attack path executed, but the target reverted before a security impact was demonstrated."
+                    )
+                    last_execution["failure_reason"] = "ImpactNotDemonstrated"
+                    emit_status("NOT_DEMONSTRATED", last_execution["runtime_error"])
+                    result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution,
+                                          runner_state="NOT_DEMONSTRATED")
+                    self._cleanup_job_workspace(path)
+                    return result
+                impact_verified = self.validator._has_meaningful_impact_assertion(
+                    self.validator._function_body(current, "testExploit")
+                ) if poc_data.get("poc_strategy", "executable") == "executable" else False
+                last_execution["impact_verified"] = impact_verified
+                if last_execution["success"] and impact_verified:
                     final_state = "PASSED"
                     detail = f"PoC validated successfully on attempt {attempt + 1}"
                     emit_status("PASSED", detail)
@@ -82,6 +130,13 @@ class ExploitRunner:
                     self._cleanup_job_workspace(path)
                     return result
                 else:
+                    if last_execution["success"] and not impact_verified:
+                        last_execution["success"] = False
+                        last_execution["runtime_error"] = (
+                            "Forge test passed, but the PoC does not assert a meaningful security impact."
+                        )
+                        last_execution["failure_reason"] = "ImpactNotVerified"
+                        output = last_execution["runtime_error"]
                     final_state = "FAILED"
             else:
                 final_state = "FAILED"
@@ -117,6 +172,7 @@ class ExploitRunner:
         stdout = stderr = ""
         returncode = None
         is_timeout = False
+        command = []
         try:
             (execution_root / "test").mkdir(parents=True)
             self.validator._copy_candidate_sources(code, execution_root / "src")
@@ -130,7 +186,7 @@ class ExploitRunner:
                 '[profile.default]\nsrc = "src"\ntest = "test"\nlibs = ["lib"]\nout = "out"\ncache_path = "cache"\n',
                 encoding="utf-8",
             )
-            command = ["forge", "test", "-vv", "--match-path", "./test/Candidate.t.sol"]
+            command = ["forge", "test", "--no-cache", "-vv", "--match-path", "./test/Candidate.t.sol"]
             solc = shutil.which("solc")
             if solc:
                 command.extend(["--use", solc])
@@ -161,7 +217,7 @@ class ExploitRunner:
         output = stdout + ("\n" if stdout and stderr else "") + stderr
         # Foundry's return code is stable across output-format changes.
         success = (returncode == 0) and not is_timeout
-        self._write_execution_artifacts(path, code, stdout, stderr, attempt)
+        self._write_execution_artifacts(path, code, stdout, stderr, attempt, command, execution_root, returncode)
         return {
             "executed": returncode is not None or is_timeout,
             "success": success,
@@ -172,6 +228,9 @@ class ExploitRunner:
             "gas_used": self._extract_gas(output),
             "execution_trace": output,
             "failure_reason": "TIMEOUT" if is_timeout else ("" if success else self._failure_reason(output, returncode)),
+            "returncode": returncode,
+            "command": command,
+            "workspace": str(execution_root),
         }
 
     def _cleanup_job_workspace(self, path: Path) -> None:
@@ -192,13 +251,19 @@ class ExploitRunner:
     def _result(self, path: Optional[Path] = None, retries: int = 0, diagnostics=None,
                 compile_result=None, execution_result=None, error: str = "", runner_state: str = "FAILED") -> Dict:
         compile_result = compile_result or {"compiled": False, "compile_error": error, "stdout": "", "stderr": "", "compile_time": 0.0}
-        execution_result = execution_result or {"executed": False, "success": False, "runtime_error": error, "stdout": "", "stderr": "", "output": "", "execution_time": 0.0, "gas_used": None, "execution_trace": ""}
-        success = bool(compile_result["compiled"] and execution_result["success"])
+        execution_result = execution_result or {"executed": False, "success": False, "impact_verified": False, "runtime_error": error, "stdout": "", "stderr": "", "output": "", "execution_time": 0.0, "gas_used": None, "execution_trace": ""}
+        success = bool(compile_result["compiled"] and execution_result["success"] and execution_result.get("impact_verified", False))
         return {
             "success": success,
             "runner_state": runner_state,
             "compiled": bool(compile_result["compiled"]),
             "executed": bool(execution_result["executed"]),
+            "impact_verified": bool(execution_result.get("impact_verified", False)),
+            "lifecycle": {
+                "generated": bool(path), "source_validated": bool(path),
+                "compiled": bool(compile_result["compiled"]), "executed": bool(execution_result["executed"]),
+                "impact_demonstrated": bool(execution_result.get("impact_verified", False)),
+            },
             "is_timeout": bool(execution_result.get("is_timeout", False)),
             "compile_error": compile_result.get("compile_error", ""),
             "runtime_error": execution_result.get("runtime_error", ""),
@@ -212,11 +277,15 @@ class ExploitRunner:
             "diagnostics": diagnostics or [],
             "compile_time": compile_result.get("compile_time", 0.0),
             "execution_time": execution_result.get("execution_time", 0.0),
+            "execution_returncode": execution_result.get("returncode"),
+            "execution_command": execution_result.get("command", []),
+            "execution_workspace": execution_result.get("workspace", ""),
             "gas_used": execution_result.get("gas_used"),
             "execution_trace": execution_result.get("execution_trace", "")
         }
 
-    def _write_execution_artifacts(self, path: Path, code: str, stdout: str, stderr: str, attempt: int) -> None:
+    def _write_execution_artifacts(self, path: Path, code: str, stdout: str, stderr: str,
+                                   attempt: int, command, workspace: Path, returncode: Optional[int]) -> None:
         reports = self.project_root / "reports"
         reports.mkdir(exist_ok=True)
         prefix = reports / f"runner_{path.stem}_{int(time.time() * 1000)}_{uuid.uuid4().hex}_attempt{attempt}_execute"
@@ -226,6 +295,10 @@ class ExploitRunner:
         # -vv writes Foundry's runtime trace to stdout; keeping a separate
         # artifact makes trace discovery independent of Forge formatting.
         prefix.with_suffix(".trace.log").write_text(stdout + ("\n" if stdout and stderr else "") + stderr, encoding="utf-8")
+        prefix.with_suffix(".metadata.json").write_text(
+            json.dumps({"attempt": attempt, "command": command, "workspace": str(workspace), "returncode": returncode}, indent=2),
+            encoding="utf-8",
+        )
 
     def _write_repair_artifacts(self, path: Path, code: str, diagnostic: str, attempt: int) -> None:
         reports = self.project_root / "reports"

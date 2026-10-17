@@ -174,11 +174,19 @@ Return ONLY valid JSON in this format:
     def _merge_verdicts(cls, contract_source: str, vulnerabilities: list, rechecked: list,
                         function_details: list = None, static_analysis_results=None) -> list:
         """Merge verdicts without allowing an LLM assertion to override source evidence."""
-        verdicts = {
-            item["original_idx"]: item for item in rechecked
-            if isinstance(item, dict) and isinstance(item.get("original_idx"), int)
-            and 0 <= item["original_idx"] < len(vulnerabilities)
-        }
+        verdicts = {}
+        for item in rechecked:
+            if not isinstance(item, dict):
+                continue
+            raw_index = item.get("original_idx", item.get("original_index", item.get("index")))
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(vulnerabilities) and index not in verdicts:
+                normalized = dict(item)
+                normalized["original_idx"] = index
+                verdicts[index] = normalized
         accepted = []
         for idx, finding in enumerate(vulnerabilities):
             verdict = verdicts.get(idx)

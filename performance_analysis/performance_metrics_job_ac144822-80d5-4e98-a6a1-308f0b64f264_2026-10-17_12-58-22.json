@@ -1,0 +1,72 @@
+{
+  "run_info": {
+    "timestamp": "2026-10-17_12-57-37",
+    "config": {
+      "analyzer_model": "qwen2.5-coder:7b",
+      "skeptic_model": "qwen2.5-coder:7b",
+      "exploiter_model": "qwen2.5-coder:7b",
+      "generator_model": "qwen2.5-coder:7b",
+      "context_model": "qwen2.5-coder:7b",
+      "all_models": null,
+      "use_rag": true,
+      "skip_poc": false,
+      "auto_run": true
+    },
+    "total_time_seconds": 45.302634954452515
+  },
+  "token_usage": {
+    "by_agent": {
+      "analyzer": {
+        "prompt_tokens": 3672,
+        "completion_tokens": 210,
+        "total_tokens": 3882,
+        "call_count": 1
+      },
+      "skeptic": {
+        "prompt_tokens": 730,
+        "completion_tokens": 120,
+        "total_tokens": 850,
+        "call_count": 1
+      }
+    },
+    "by_model": {
+      "qwen2.5-coder:7b": {
+        "prompt_tokens": 4402,
+        "completion_tokens": 330,
+        "total_tokens": 4732,
+        "call_count": 2
+      }
+    },
+    "total": {
+      "prompt_tokens": 4402,
+      "completion_tokens": 330,
+      "total_tokens": 4732,
+      "call_count": 2
+    }
+  },
+  "code_metrics": {
+    "total_lines": 22,
+    "file_count": 1,
+    "files": [
+      "C:\\Project\\VLD\\uploads\\ac144822-80d5-4e98-a6a1-308f0b64f264_PastedContract.sol"
+    ]
+  },
+  "time_metrics": {
+    "total_seconds": 45.302634954452515,
+    "stage_times": {
+      "initialization": 0.0,
+      "static_analysis": 5.105259418487549,
+      "project_context_agent": 0.0019998550415039062,
+      "analyzer_agent": 20.052905321121216,
+      "skeptic_agent": 6.323865175247192,
+      "exploiter_agent": 0.0,
+      "generator_agent": 9.449229001998901,
+      "exploit_runner": 4.367306709289551,
+      "results_reporting": 0.0
+    }
+  },
+  "derived_metrics": {
+    "tokens_per_second": 104.45308544983256,
+    "tokens_per_loc": 215.0909090909091
+  }
+}

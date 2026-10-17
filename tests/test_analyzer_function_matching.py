@@ -43,6 +43,87 @@ class AnalyzerFunctionMatchingTests(unittest.TestCase):
 
         self.assertNotIn("access_control", {finding["vulnerability_type"] for finding in findings})
 
+    def test_constructor_zero_address_claim_is_not_access_control(self):
+        findings = [{
+            "vulnerability_type": "ACCESS_CONTROL",
+            "affected_functions": ["ContextAnalysisTest.constructor(address,address)"],
+            "reasoning": "The constructor does not reject a zero treasury address.",
+        }]
+        contract_info = {
+            "source_code": "contract ContextAnalysisTest { constructor(address oracle, address treasury) {} }",
+            "function_details": [{
+                "function": "constructor",
+                "function_id": "constructor(address,address)",
+                "visibility": "public",
+                "content": "constructor(address oracle, address treasury) { owner = msg.sender; }",
+            }],
+        }
+
+        self.assertEqual(AnalyzerAgent._validate_findings(findings, contract_info), [])
+
+    def test_unprotected_owner_setter_remains_access_control(self):
+        findings = [{
+            "vulnerability_type": "ACCESS_CONTROL",
+            "affected_functions": ["changeOwner(address)"],
+        }]
+        contract_info = {"function_details": [{
+            "function": "changeOwner",
+            "function_id": "changeOwner(address)",
+            "visibility": "external",
+            "modifiers": [],
+            "content": "function changeOwner(address nextOwner) external { owner = nextOwner; }",
+        }]}
+
+        validated = AnalyzerAgent._validate_findings(findings, contract_info)
+        self.assertEqual([finding["vulnerability_type"] for finding in validated], ["access_control"])
+
+    def test_reentrancy_requires_a_post_call_state_update_in_the_affected_function(self):
+        vulnerable = """function withdraw(uint256 amount) external {
+            require(balances[msg.sender] >= amount);
+            (bool ok,) = msg.sender.call{value: amount}("");
+            require(ok);
+            balances[msg.sender] -= amount;
+        }"""
+        safe = """function withdraw(uint256 amount) external {
+            require(balances[msg.sender] >= amount);
+            balances[msg.sender] -= amount;
+            (bool ok,) = msg.sender.call{value: amount}("");
+            require(ok);
+        }"""
+        finding = [{"vulnerability_type": "REENTRANCY", "affected_functions": ["withdraw(uint256)"]}]
+        base = {"function": "withdraw", "function_id": "withdraw(uint256)", "visibility": "external", "modifiers": []}
+
+        validated = AnalyzerAgent._validate_findings(finding, {"function_details": [{**base, "content": vulnerable}]})
+        self.assertEqual(len(validated), 1)
+        self.assertEqual(validated[0]["vulnerability_type"], "reentrancy")
+        self.assertEqual(validated[0]["affected_functions"], ["withdraw(uint256)"])
+        self.assertEqual(
+            AnalyzerAgent._validate_findings(finding, {"function_details": [{**base, "content": safe}]}), [],
+        )
+
+    def test_unrestricted_emergency_withdrawal_is_source_detected(self):
+        source = """contract Vault {
+            function emergencyWithdraw() external {
+                payable(msg.sender).transfer(address(this).balance);
+            }
+        }"""
+        findings = AnalyzerAgent._add_deterministic_findings([], {"source_code": source, "function_details": []})
+        self.assertTrue(any(
+            finding["vulnerability_type"] == "access_control"
+            and finding["affected_functions"] == ["emergencyWithdraw()"]
+            for finding in findings
+        ))
+
+    def test_category_deduplication_normalizes_case_without_merging_different_functions(self):
+        agent = AnalyzerAgent.__new__(AnalyzerAgent)
+        findings = agent._deduplicate_vulnerabilities([
+            {"vulnerability_type": "ACCESS_CONTROL", "affected_functions": ["setOwner(address)"], "confidence_score": 0.6},
+            {"vulnerability_type": "access_control", "affected_functions": ["setOwner(address)"], "confidence_score": 0.8, "remediation": "restrict"},
+            {"vulnerability_type": "ACCESS_CONTROL", "affected_functions": ["emergencyWithdraw()"], "confidence_score": 0.9},
+        ])
+        self.assertEqual(len(findings), 2)
+        self.assertTrue(all(item["vulnerability_type"] == "access_control" for item in findings))
+
     def test_normalizes_llm_function_references_for_lookup(self):
         cases = [
         ("withdraw", "withdraw(uint256)"),

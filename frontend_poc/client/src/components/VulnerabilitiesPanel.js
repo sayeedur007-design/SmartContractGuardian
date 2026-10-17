@@ -114,6 +114,13 @@ const VulnerabilitiesPanel = ({ vulnerabilities }) => {
                 </div>
 
                 <div>
+                  <h4 className="text-sm font-medium text-gray-700">Validation Status</h4>
+                  <p className="text-sm text-gray-600 mt-1">
+                    {selectedVuln.skeptic_status || "Not independently validated"}
+                  </p>
+                </div>
+
+                <div>
                   <h4 className="text-sm font-medium text-gray-700">
                     Affected Functions
                   </h4>

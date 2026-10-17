@@ -218,7 +218,7 @@ class AgentCoordinator:
                     console.print(f"[bold red]PoC rejected: {poc_data.get('generation_error', 'no Solidity file created')}[/bold red]")
 
                 # Run and fix the exploit if auto-run is enabled
-                if auto_run_config.get("auto_run", True) and poc_data.get("poc_strategy", "executable") == "executable":
+                if auto_run_config.get("auto_run", True) and poc_data.get("poc_strategy", "executable") in {"executable", "regression"}:
                     performance_tracker.start_stage("exploit_runner")
                     console.print(f"\n[bold blue]🔍 ExploitRunner: Testing and fixing PoC...[/bold blue]")
                     run_result = self.runner.run_and_fix_exploit(poc_data)
@@ -236,6 +236,9 @@ class AgentCoordinator:
                     # Add execution results to the PoC data
                     poc_data["execution_results"] = {
                         "success": run_result.get("success", False),
+                        "impact_verified": run_result.get("impact_verified", False),
+                        "runner_state": run_result.get("runner_state", "FAILED"),
+                        "lifecycle": run_result.get("lifecycle", {}),
                         "compiled": run_result.get("compiled", False),
                         "executed": run_result.get("executed", False),
                         "retries": run_result.get("retries", 0),
@@ -272,6 +275,7 @@ class AgentCoordinator:
                         console.print("[dim]Auto-run disabled. Test generated but not executed.[/dim]")
                     poc_data["execution_results"] = {
                         "success": False,
+                        "impact_verified": False,
                         "compiled": poc_data.get("compiled", False),
                         "executed": False,
                         "retries": 0,

@@ -127,7 +127,11 @@ class AnalyzerAgent:
         """Remove redundant findings of the same type in the same functions."""
         merged = {}
         for v in vulnerabilities:
-            v_type = v.get("vulnerability_type", "").lower()
+            v_type = self._canonical_vulnerability_type(v.get("vulnerability_type", ""))
+            if not v_type:
+                continue
+            v = dict(v)
+            v["vulnerability_type"] = v_type
             # Sort affected functions for consistent keys
             affected = sorted(v.get("affected_functions", []))
             # Create a unique key based on type and affected functions
@@ -140,13 +144,34 @@ class AnalyzerAgent:
             current_confidence = self._confidence_value(current.get("confidence_score"))
             new_confidence = self._confidence_value(v.get("confidence_score"))
             stronger, supporting = (v, current) if new_confidence > current_confidence else (current, v)
-            merged[key] = dict(stronger)
+            merged_item = dict(stronger)
+            # Keep evidence and user-facing remediation that only one source
+            # supplied; deduplication must not erase provenance or status.
+            for field in ("code_snippet", "remediation", "impact", "severity", "source_mapping",
+                          "skeptic_status", "validity_reasoning", "skeptic_evidence_lines", "evidence_source"):
+                if not merged_item.get(field) and supporting.get(field):
+                    merged_item[field] = supporting[field]
+            merged[key] = merged_item
             supporting_reason = str(supporting.get("reasoning", "")).strip()
             if supporting_reason and supporting_reason not in merged[key].get("reasoning", ""):
                 merged[key]["reasoning"] = (
                     f"{merged[key].get('reasoning', '').strip()} Supporting evidence: {supporting_reason}"
                 ).strip()
         return list(merged.values())
+
+    @staticmethod
+    def _canonical_vulnerability_type(value) -> str:
+        """Normalize category identifiers at the analysis boundary."""
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+        aliases = {
+            "accesscontrol": "access_control",
+            "weak_randomness": "bad_randomness",
+            "bad_randomness": "bad_randomness",
+            "timestamp_dependence": "timestamp_dependence",
+            "timestamp_dependency": "timestamp_dependence",
+            "unchecked_low_level_call": "unchecked_low_level_calls",
+        }
+        return aliases.get(normalized, normalized)
 
     @staticmethod
     def _confidence_value(value) -> float:
@@ -463,13 +488,32 @@ class AnalyzerAgent:
             detail["function_id"] for detail in details
             if public_or_external(detail) and not protected(detail)
             and re.search(r"\b(?:emergency|sweep|rescue)\w*\s*\(", detail.get("content", ""), re.I)
-            and re.search(r"(?:payable\s*\(\s*msg\.sender\s*\)|msg\.sender)\s*\.\s*(?:transfer|send|call)\s*(?:\{[^}]*\})?\s*\(\s*address\s*\(\s*this\s*\)\.balance", detail.get("content", ""), re.I)
+            and re.search(r"address\s*\(\s*this\s*\)\.balance|\buint256\s+amount\s*=\s*address\s*\(\s*this\s*\)\.balance", detail.get("content", ""), re.I)
+            and re.search(r"\b(?:payable\s*\([^)]*\)|[A-Za-z_]\w*)\s*\.\s*(?:transfer|send|call)\s*(?:\{[^}]*\})?\s*\(", detail.get("content", ""), re.I)
         ]
         add_access_control_finding(
             unrestricted_emergency_withdrawal, 0.95,
             "An externally callable emergency-style function transfers the contract's full balance without authorization.",
             "Restrict emergency withdrawal of contract-held funds to an authorized role.",
         )
+
+        tx_origin_authentication = [
+            detail["function_id"] for detail in details
+            if public_or_external(detail)
+            and re.search(r"\btx\.origin\s*==|==\s*tx\.origin\b", detail.get("content", ""), re.I)
+        ]
+        if tx_origin_authentication and not any(
+            str(item.get("vulnerability_type", "")).lower() == "tx_origin_authentication"
+            and set(item.get("affected_functions", []) or []) == set(tx_origin_authentication)
+            for item in findings
+        ):
+            findings.append({
+                "vulnerability_type": "tx_origin_authentication", "confidence_score": 0.85,
+                "reasoning": "Deterministic source evidence: authorization-relevant logic compares tx.origin.",
+                "affected_functions": tx_origin_authentication, "impact": "High", "severity": "High",
+                "remediation": "Use msg.sender with an explicit authorization policy instead of tx.origin.",
+                "exploitation_scenario": "An intermediary contract can cause tx.origin-based authorization to make unsafe trust decisions.",
+            })
 
         arbitrary_balance_write = [
             detail["function_id"] for detail in details
@@ -828,8 +872,8 @@ class AnalyzerAgent:
             if not isinstance(finding, dict) or not finding.get("vulnerability_type"):
                 continue
 
-            vuln_type = str(finding.get("vulnerability_type", "")).strip()
-            vuln_type_lower = vuln_type.lower()
+            vuln_type = AnalyzerAgent._canonical_vulnerability_type(finding.get("vulnerability_type", ""))
+            vuln_type_lower = vuln_type
 
             raw_affected = finding.get("affected_functions", [])
             affected = AnalyzerAgent._normalize_affected_functions_for_lookup(
@@ -840,7 +884,22 @@ class AnalyzerAgent:
                 continue
 
             item = dict(finding)
+            item["vulnerability_type"] = vuln_type
             item["affected_functions"] = affected
+
+            # Constructors are deployment-time entry points, not functions an
+            # arbitrary post-deployment caller can invoke.  A missing input
+            # validation check alone therefore cannot substantiate an access-
+            # control finding.  Other constructor-related categories continue
+            # through their normal evidence validation below.
+            if "access" in vuln_type_lower and "control" in vuln_type_lower:
+                affected_names = {
+                    str(function_id).split("(", 1)[0].split(".")[-1].lower()
+                    for function_id in affected
+                }
+                if affected_names == {"constructor"}:
+                    logger.warning("Discarding ACCESS_CONTROL finding %r: constructors are not externally callable authorization boundaries.", vuln_type)
+                    continue
 
             # Collect source contents of affected functions
             affected_contents = []
@@ -850,6 +909,19 @@ class AnalyzerAgent:
                     affected_contents.append((func_id, fn_detail, fn_detail["content"]))
 
             if affected_contents:
+                # A withdrawal lacking a parameter named "slippage" is not a
+                # slippage vulnerability.  Keep this category for operations
+                # that actually exchange assets using price/quote outputs.
+                if "slippage" in vuln_type_lower:
+                    slippage_relevant = any(
+                        re.search(r"\b(?:swap|trade|exchange|liquidat)\w*\s*\(", content, re.I)
+                        and re.search(r"\b(?:amountOut|amountIn|quote|price|rate)\b", content, re.I)
+                        for _, _, content in affected_contents
+                    )
+                    if not slippage_relevant:
+                        logger.warning("Discarding slippage finding %r: affected function has no exchange/price operation.", vuln_type)
+                        continue
+
                 # 1. TIMESTAMP validation: Must have block.timestamp/derived logic in source & affected function
                 if "timestamp" in vuln_type_lower:
                     if not _has_timestamp:
@@ -951,6 +1023,11 @@ class AnalyzerAgent:
                         logger.warning("Discarding REENTRANCY finding %r: no external call before state update found or protected by guard.", vuln_type)
                         continue
                     item["affected_functions"] = reentrant_funcs
+                    item["reasoning"] = (
+                        "Source evidence: the affected function performs an external value call before "
+                        "decrementing the caller's recorded balance. The call result is checked; the risk is "
+                        "the ordering of the interaction and state effect, not an unchecked return value."
+                    )
 
             # Ground exploitation scenario
             item["exploitation_scenario"] = AnalyzerAgent._build_grounded_exploitation_scenario(

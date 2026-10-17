@@ -79,13 +79,14 @@ class ProjectContextLLMAgent:
         # Analyzer and Skeptic; retain the same source-derived UI context.
         if len(contract_metadata) <= 1:
             contract_info, source_dependencies = self._build_project_structure(contract_metadata)
+            source_context = self._single_file_context(contract_info)
             return {
                 'llm_analysis': '',
-                'insights': [],
+                'insights': source_context['insights'],
                 'dependencies': source_dependencies,
-                'vulnerabilities': [],
-                'recommendations': [],
-                'important_functions': [],
+                'vulnerabilities': source_context['vulnerabilities'],
+                'recommendations': source_context['recommendations'],
+                'important_functions': source_context['important_functions'],
                 'contract_files': [m.get('file_path', 'unknown') for m in contract_metadata],
                 'contract_details': contract_info,
                 'call_graph': call_graph,
@@ -93,8 +94,8 @@ class ProjectContextLLMAgent:
                 'stats': {
                     'total_contracts': len(contract_metadata),
                     'total_relationships': len(source_dependencies),
-                    'total_vulnerabilities': 0,
-                    'total_recommendations': 0,
+                    'total_vulnerabilities': len(source_context['vulnerabilities']),
+                    'total_recommendations': len(source_context['recommendations']),
                     'has_inter_contract_calls': bool(source_dependencies),
                 },
             }
@@ -129,7 +130,8 @@ class ProjectContextLLMAgent:
                         'file': os.path.basename(file_path),
                         'name': contract_name,
                         'type': contract_type,
-                        'inherits': [base.strip().split(' ')[0] for base in (inherited or '').split(',') if base.strip()]
+                        'inherits': [base.strip().split(' ')[0] for base in (inherited or '').split(',') if base.strip()],
+                        **self._extract_contract_members(content, match.end()),
                     })
                 summary_lines = content.split('\n')[:15]
                 summary = '\n'.join(summary_lines) + '\n...' if len(summary_lines) > 15 else content
@@ -144,6 +146,124 @@ class ProjectContextLLMAgent:
             except Exception as e:
                 logger.error(f"Error extracting metadata from {file_path}: {str(e)}")
         return metadata
+
+    @staticmethod
+    def _extract_contract_members(source: str, body_start: int) -> Dict:
+        """Extract the small declaration subset needed by source-derived context.
+
+        This is deliberately not a replacement for Slither.  It supplies useful
+        single-file context when there are no inter-contract relationships to
+        send to the project-context model.
+        """
+        depth = 1
+        cursor = body_start
+        while cursor < len(source) and depth:
+            if source[cursor] == '{':
+                depth += 1
+            elif source[cursor] == '}':
+                depth -= 1
+            cursor += 1
+        body = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/', '', source[body_start:cursor - 1])
+        functions = []
+        spans = []
+        declaration = re.compile(
+            r'\b(?:(constructor)|function\s+(\w+))\s*\(([^)]*)\)\s*([^\{;]*)([\{;])',
+            re.MULTILINE,
+        )
+        for match in declaration.finditer(body):
+            end = match.end()
+            if match.group(5) == '{':
+                function_depth = 1
+                while end < len(body) and function_depth:
+                    if body[end] == '{':
+                        function_depth += 1
+                    elif body[end] == '}':
+                        function_depth -= 1
+                    end += 1
+            spans.append((match.start(), end))
+            name = 'constructor' if match.group(1) else match.group(2)
+            parameters = ' '.join(match.group(3).split())
+            suffix = match.group(4)
+            visibility = next((value for value in ('external', 'public', 'internal', 'private') if re.search(rf'\b{value}\b', suffix)), '')
+            mutability = next((value for value in ('view', 'pure', 'payable') if re.search(rf'\b{value}\b', suffix)), '')
+            modifier_text = re.sub(r'\breturns\s*\([^)]*\)', '', suffix)
+            functions.append({
+                'name': name,
+                'signature': f'{name}({parameters})',
+                'visibility': visibility,
+                'mutability': mutability,
+                'modifiers': [value for value in re.findall(r'\b[A-Za-z_]\w*\b', modifier_text) if value not in {'external', 'public', 'internal', 'private', 'view', 'pure', 'payable', 'virtual', 'override', 'returns'}],
+                'body': body[match.end():end - 1] if match.group(5) == '{' else '',
+            })
+        top_level = list(body)
+        for start, end in spans:
+            top_level[start:end] = ' ' * (end - start)
+        state_variables = []
+        for statement in ''.join(top_level).split(';'):
+            match = re.search(r'\b(mapping\s*\([^)]*\)|[A-Za-z_]\w*(?:\[\])?)\s+(public|private|internal|external)?\s*([A-Za-z_]\w*)\s*(?:=.*)?$', statement.strip())
+            if not match or re.search(r'\b(?:pragma|import|using|event|error|struct|enum)\b', statement):
+                continue
+            state_variables.append({'type': match.group(1), 'visibility': match.group(2) or '', 'name': match.group(3)})
+        events = re.findall(r'\bevent\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*;', ''.join(top_level))
+        modifiers = re.findall(r'\bmodifier\s+([A-Za-z_]\w*)\s*\(([^)]*)\)', ''.join(top_level))
+        for function in functions:
+            reads, writes, external_calls = [], [], []
+            for variable in state_variables:
+                variable_name = variable['name']
+                if re.search(rf'\b{re.escape(variable_name)}\b', function['body']):
+                    reads.append(variable_name)
+                if re.search(rf'\b{re.escape(variable_name)}(?:\s*\[[^]]+\])?\s*(?:=|\+=|-=|\*=|/=)', function['body']):
+                    writes.append(variable_name)
+                if re.search(rf'\b{re.escape(variable_name)}\s*\.\s*([A-Za-z_]\w*)\s*\(', function['body']):
+                    external_calls.append(variable_name)
+            function['state_reads'] = reads
+            function['state_writes'] = writes
+            function['external_calls'] = external_calls
+        public_getters = [f"{item['name']}()" for item in state_variables if item['visibility'] == 'public']
+        return {
+            'state_variables': state_variables,
+            'functions': functions,
+            'generated_getters': public_getters,
+            'events': [{'name': name, 'parameters': ' '.join(parameters.split())} for name, parameters in events],
+            'modifiers': [{'name': name, 'parameters': ' '.join(parameters.split())} for name, parameters in modifiers],
+        }
+
+    def _single_file_context(self, contract_details: List[Dict]) -> Dict[str, List[str]]:
+        """Produce deterministic, local context for a source with no relationships."""
+        insights, vulnerabilities, recommendations, important_functions = [], [], [], []
+        for detail in contract_details:
+            name = detail.get('name', 'Contract')
+            state_variables = detail.get('state_variables', [])
+            functions = detail.get('functions', [])
+            getters = detail.get('generated_getters', [])
+            if state_variables or functions:
+                insights.append(
+                    f"{name} declares {len(state_variables)} state variable(s), "
+                    f"{len(functions)} function declaration(s), and {len(getters)} public getter(s)."
+                )
+            owner_names = {item['name'] for item in state_variables if item['name'].lower() in {'owner', 'admin'} }
+            for function in functions:
+                if function['name'] == 'constructor':
+                    continue
+                qualified = f"{name}.{function['signature']}"
+                if function.get('external_calls') or re.search(r'\.call\s*\{', function['body']):
+                    important_functions.append(qualified)
+                writes_owner = any(re.search(rf'\b{re.escape(owner)}\s*=', function['body']) for owner in owner_names)
+                has_authorization = (
+                    any('onlyowner' in modifier.lower() or 'onlyadmin' in modifier.lower() for modifier in function['modifiers'])
+                    or bool(re.search(r'\brequire\s*\(\s*msg\.sender\s*==', function['body']))
+                )
+                if writes_owner and not has_authorization:
+                    if qualified not in important_functions:
+                        important_functions.append(qualified)
+                    vulnerabilities.append(f"{qualified} writes ownership state without an authorization check.")
+                    recommendations.append(f"Restrict {qualified} to an authorized owner or explicitly defined access-control policy.")
+        return {
+            'insights': insights,
+            'vulnerabilities': vulnerabilities,
+            'recommendations': recommendations,
+            'important_functions': self._unique_strings(important_functions),
+        }
     
     def _analyze_with_llm(self, contract_metadata: List[Dict], call_graph: Optional[Dict], contracts_dir: str) -> Dict:
         """
@@ -293,6 +413,27 @@ class ProjectContextLLMAgent:
             for source in meta.get('contract_names', []):
                 for target in imported_contracts:
                     dependencies.append(f"{source} imports {target}")
+        known_interfaces = {detail['name'] for detail in details if detail.get('type') == 'interface'}
+        for detail in details:
+            if detail.get('type') != 'contract':
+                continue
+            interface_variables = {
+                variable['name']: variable['type']
+                for variable in detail.get('state_variables', [])
+                if variable.get('type') in known_interfaces
+            }
+            for variable, interface in interface_variables.items():
+                calls = [
+                    call.group(1)
+                    for function in detail.get('functions', [])
+                    for call in [re.search(rf'\b{re.escape(variable)}\s*\.\s*([A-Za-z_]\w*)\s*\(', function.get('body', ''))]
+                    if call
+                ]
+                if calls:
+                    for call in self._unique_strings(calls):
+                        dependencies.append(f"{detail['name']} calls {interface}.{call} via {variable}")
+                elif any(variable in function.get('state_reads', []) or variable in function.get('state_writes', []) for function in detail.get('functions', [])):
+                    dependencies.append(f"{detail['name']} uses {interface} via {variable}")
         return details, self._unique_strings(dependencies)
 
     def _generate_mermaid_diagram(self, contract_details: List[Dict], dependencies: List[str]) -> str:
@@ -307,17 +448,19 @@ class ProjectContextLLMAgent:
             name_to_id[name] = node_id
             label = name.replace('"', "'")
             lines.append(f'{node_id}["{label}"]')
-        relationship = re.compile(r'^(\w+)\s+(?:inherits from|imports|uses|implements|extends|depends on|interacts with|calls)\s+(\w+)')
+        relationship = re.compile(r'^(\w+)\s+(inherits from|imports|uses|implements|extends|depends on|interacts with|calls)\s+(\w+)(.*)$')
         for dependency in dependencies:
             match = relationship.match(dependency)
             if not match or match.group(1) not in name_to_id:
                 continue
-            target = match.group(2)
+            relation, target, suffix = match.group(2), match.group(3), match.group(4)
             if target not in name_to_id:
                 target_id = f"n{len(name_to_id)}"
                 name_to_id[target] = target_id
                 lines.append(f'{target_id}["{target.replace(chr(34), chr(39))}"]')
-            lines.append(f"{name_to_id[match.group(1)]} --> {name_to_id[target]}")
+            label_suffix = suffix.replace('.', ' ', 1) if suffix.startswith('.') else suffix
+            label = f"{relation}{label_suffix}".replace('"', "'").replace('|', '/')
+            lines.append(f"{name_to_id[match.group(1)]} -->|{label}| {name_to_id[target]}")
         return '\n'.join(lines)
     
     def _call_llm(self, system_prompt: str, user_prompt: str) -> str:

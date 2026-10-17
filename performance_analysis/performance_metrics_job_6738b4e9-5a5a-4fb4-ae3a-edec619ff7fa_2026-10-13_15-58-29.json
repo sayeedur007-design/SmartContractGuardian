@@ -1,0 +1,78 @@
+{
+  "run_info": {
+    "timestamp": "2026-10-13_15-56-07",
+    "config": {
+      "analyzer_model": "qwen2.5-coder:7b",
+      "skeptic_model": "qwen2.5-coder:7b",
+      "exploiter_model": "qwen2.5-coder:7b",
+      "generator_model": "qwen2.5-coder:7b",
+      "context_model": "qwen2.5-coder:7b",
+      "all_models": null,
+      "use_rag": true,
+      "skip_poc": false,
+      "auto_run": true
+    },
+    "total_time_seconds": 142.31801342964172
+  },
+  "token_usage": {
+    "by_agent": {
+      "analyzer": {
+        "prompt_tokens": 3588,
+        "completion_tokens": 810,
+        "total_tokens": 4398,
+        "call_count": 1
+      },
+      "skeptic": {
+        "prompt_tokens": 1092,
+        "completion_tokens": 285,
+        "total_tokens": 1377,
+        "call_count": 1
+      },
+      "exploiter": {
+        "prompt_tokens": 538,
+        "completion_tokens": 170,
+        "total_tokens": 708,
+        "call_count": 1
+      }
+    },
+    "by_model": {
+      "qwen2.5-coder:7b": {
+        "prompt_tokens": 5218,
+        "completion_tokens": 1265,
+        "total_tokens": 6483,
+        "call_count": 3
+      }
+    },
+    "total": {
+      "prompt_tokens": 5218,
+      "completion_tokens": 1265,
+      "total_tokens": 6483,
+      "call_count": 3
+    }
+  },
+  "code_metrics": {
+    "total_lines": 54,
+    "file_count": 1,
+    "files": [
+      "C:\\Project\\VLD\\uploads\\6738b4e9-5a5a-4fb4-ae3a-edec619ff7fa_PastedContract.sol"
+    ]
+  },
+  "time_metrics": {
+    "total_seconds": 142.31801342964172,
+    "stage_times": {
+      "initialization": 0.0,
+      "static_analysis": 3.597245931625366,
+      "project_context_agent": 0.004000186920166016,
+      "analyzer_agent": 49.82318115234375,
+      "skeptic_agent": 14.8893461227417,
+      "exploiter_agent": 9.692266464233398,
+      "generator_agent": 14.774500131607056,
+      "exploit_runner": 49.53093433380127,
+      "results_reporting": 0.0
+    }
+  },
+  "derived_metrics": {
+    "tokens_per_second": 45.552912409116956,
+    "tokens_per_loc": 120.05555555555556
+  }
+}
