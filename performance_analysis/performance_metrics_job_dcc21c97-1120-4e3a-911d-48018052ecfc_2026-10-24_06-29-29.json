@@ -1,0 +1,77 @@
+{
+  "run_info": {
+    "timestamp": "2026-10-24_06-26-01",
+    "config": {
+      "analyzer_model": "qwen2.5-coder:7b",
+      "skeptic_model": "qwen2.5-coder:7b",
+      "exploiter_model": "qwen2.5-coder:7b",
+      "generator_model": "qwen2.5-coder:7b",
+      "context_model": "qwen2.5-coder:7b",
+      "all_models": null,
+      "use_rag": true,
+      "skip_poc": false,
+      "auto_run": true
+    },
+    "total_time_seconds": 207.91485691070557
+  },
+  "token_usage": {
+    "by_agent": {
+      "analyzer": {
+        "prompt_tokens": 2989,
+        "completion_tokens": 150,
+        "total_tokens": 3139,
+        "call_count": 1
+      },
+      "skeptic": {
+        "prompt_tokens": 779,
+        "completion_tokens": 306,
+        "total_tokens": 1085,
+        "call_count": 1
+      },
+      "exploiter": {
+        "prompt_tokens": 1621,
+        "completion_tokens": 555,
+        "total_tokens": 2176,
+        "call_count": 3
+      }
+    },
+    "by_model": {
+      "qwen2.5-coder:7b": {
+        "prompt_tokens": 5389,
+        "completion_tokens": 1011,
+        "total_tokens": 6400,
+        "call_count": 5
+      }
+    },
+    "total": {
+      "prompt_tokens": 5389,
+      "completion_tokens": 1011,
+      "total_tokens": 6400,
+      "call_count": 5
+    }
+  },
+  "code_metrics": {
+    "total_lines": 12,
+    "file_count": 1,
+    "files": [
+      "C:\\Project\\VLD\\uploads\\dcc21c97-1120-4e3a-911d-48018052ecfc_PastedContract.sol"
+    ]
+  },
+  "time_metrics": {
+    "total_seconds": 207.91485691070557,
+    "stage_times": {
+      "initialization": 0.0,
+      "static_analysis": 6.40826940536499,
+      "project_context_agent": 0.004007101058959961,
+      "analyzer_agent": 20.690515995025635,
+      "skeptic_agent": 16.033957958221436,
+      "exploiter_agent": 32.499366998672485,
+      "generator_agent": 132.27021956443787,
+      "results_reporting": 0.0
+    }
+  },
+  "derived_metrics": {
+    "tokens_per_second": 30.781831058608024,
+    "tokens_per_loc": 533.3333333333334
+  }
+}

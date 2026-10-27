@@ -21,6 +21,53 @@ from utils.print_utils import print_step, print_success, print_warning
 from utils.token_tracker import performance_tracker
 
 class AgentCoordinator:
+    @staticmethod
+    def _record_runner_result(poc_data: Dict, run_result: Dict) -> Dict:
+        """Normalize the runner contract and keep the report source in sync."""
+        compiled = run_result.get("compiled") is True
+        executed = run_result.get("executed") is True
+        runner_state = run_result.get("runner_state", "FAILED")
+        impact_verified = (
+            run_result.get("impact_verified") is True
+            and run_result.get("success") is True
+            and runner_state == "PASSED"
+            and compiled
+            and executed
+        )
+        success = (
+            run_result.get("success") is True
+            and runner_state == "PASSED"
+            and compiled
+            and executed
+            and impact_verified
+        )
+        final_candidate = run_result.get("final_candidate")
+        if isinstance(final_candidate, str) and final_candidate:
+            poc_data["exploit_code"] = final_candidate
+
+        return {
+            "success": success,
+            "impact_verified": impact_verified,
+            "runner_state": runner_state,
+            "lifecycle": run_result.get("lifecycle", {}),
+            "compiled": compiled,
+            "executed": executed,
+            "retries": run_result.get("retries", 0),
+            "final_attempt": run_result.get("final_attempt"),
+            "compile_error": run_result.get("compile_error", ""),
+            "runtime_error": run_result.get("runtime_error", ""),
+            "failure_reason": run_result.get("failure_reason", ""),
+            "is_timeout": run_result.get("is_timeout", False),
+            "stdout": run_result.get("stdout", ""),
+            "stderr": run_result.get("stderr", ""),
+            "output": run_result.get("output", ""),
+            "diagnostics": run_result.get("diagnostics", []),
+            "gas_used": run_result.get("gas_used"),
+            "execution_trace": run_result.get("execution_trace", ""),
+            "compile_time": run_result.get("compile_time", 0.0),
+            "execution_time": run_result.get("execution_time", 0.0),
+        }
+
     def __init__(self, model_config=None, use_rag=True):
         """
         Initialize the agent coordinator with configurable models.
@@ -207,7 +254,9 @@ class AgentCoordinator:
                     console.print(f"[dim]Created base file: {base_file}[/dim]")
 
                 # Generate the PoC for this vulnerability
-                # Preserve target metadata so the generator imports the analyzed source by name.
+                # Preserve the selected finding and target metadata so the
+                # generator can select a source-derived exploit template.
+                plan_data["vulnerability"] = vul
                 plan_data["target_contract"] = contract_info.get("target_contract", {})
                 console.print("[dim]Generator called.[/dim]")
                 poc_data = self.generator.generate(plan_data)
@@ -222,8 +271,9 @@ class AgentCoordinator:
                     performance_tracker.start_stage("exploit_runner")
                     console.print(f"\n[bold blue]🔍 ExploitRunner: Testing and fixing PoC...[/bold blue]")
                     run_result = self.runner.run_and_fix_exploit(poc_data)
+                    execution_results = self._record_runner_result(poc_data, run_result)
 
-                    if run_result.get("success"):
+                    if execution_results["success"]:
                         console.print(f"[bold green]✓ Test executed successfully![/bold green]")
                     else:
                         if run_result.get("retries") > 0:
@@ -234,39 +284,26 @@ class AgentCoordinator:
                             console.print(f"[dim]Error: {run_result.get('error', 'Unknown error')}[/dim]")
 
                     # Add execution results to the PoC data
-                    poc_data["execution_results"] = {
-                        "success": run_result.get("success", False),
-                        "impact_verified": run_result.get("impact_verified", False),
-                        "runner_state": run_result.get("runner_state", "FAILED"),
-                        "lifecycle": run_result.get("lifecycle", {}),
-                        "compiled": run_result.get("compiled", False),
-                        "executed": run_result.get("executed", False),
-                        "retries": run_result.get("retries", 0),
-                        "compile_error": run_result.get("compile_error", ""),
-                        "runtime_error": run_result.get("runtime_error", ""),
-                        "failure_reason": run_result.get("failure_reason", ""),
-                        "stdout": run_result.get("stdout", ""),
-                        "stderr": run_result.get("stderr", ""),
-                        "gas_used": run_result.get("gas_used"),
-                        "execution_trace": run_result.get("execution_trace", ""),
-                        "compile_time": run_result.get("compile_time", 0.0),
-                        "execution_time": run_result.get("execution_time", 0.0),
-                    }
+                    poc_data["execution_results"] = execution_results
+                    if execution_results.get("lifecycle"):
+                        # The generator lifecycle is a pre-execution snapshot;
+                        # publish the runner's final state on the PoC itself.
+                        poc_data["lifecycle"] = execution_results["lifecycle"]
                     # Metrics are derived only from the runner's observed
                     # compilation/execution result, never inferred from a
                     # generated file or output text.
                     poc_metrics["repair_attempts"] += run_result.get("retries", 0)
-                    if run_result.get("compiled"):
+                    if execution_results["compiled"]:
                         poc_metrics["compiled_pocs"] += 1
                         poc_metrics["_compile_times"].append(run_result.get("compile_time", 0.0))
                     else:
                         poc_metrics["compilation_failures"] += 1
-                    if run_result.get("executed"):
+                    if execution_results["executed"]:
                         poc_metrics["executed_pocs"] += 1
                         poc_metrics["_execution_times"].append(run_result.get("execution_time", 0.0))
-                    if run_result.get("compiled") and run_result.get("executed") and not run_result.get("success"):
+                    if execution_results["compiled"] and execution_results["executed"] and not execution_results["success"]:
                         poc_metrics["execution_failures"] += 1
-                    if run_result.get("success"):
+                    if execution_results["success"]:
                         poc_metrics["successful_exploits"] += 1
                 else:
                     if poc_data.get("poc_strategy") in {"demonstration", "informational"}:
@@ -289,7 +326,15 @@ class AgentCoordinator:
                 # Add PoC data to the result
                 poc_info["poc_data"] = poc_data
                 generated_pocs.append(poc_info)
-                console.print(f"[bold green]✓ Generated demonstration for {vul.get('vulnerability_type')}[/bold green]")
+                final_result = poc_data.get("execution_results", {}) or {}
+                if (
+                    final_result.get("success") is True
+                    and final_result.get("impact_verified") is True
+                    and final_result.get("compiled") is True
+                    and final_result.get("executed") is True
+                    and final_result.get("runner_state") == "PASSED"
+                ):
+                    console.print(f"[bold green]✓ Generated demonstration for {vul.get('vulnerability_type')}[/bold green]")
 
         # End the last stage
         performance_tracker.end_stage()

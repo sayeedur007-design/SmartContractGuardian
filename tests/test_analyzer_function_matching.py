@@ -172,14 +172,31 @@ class AnalyzerFunctionMatchingTests(unittest.TestCase):
             "withdraw(uint256)",
         )
 
-    def test_validation_keeps_unmappable_identifier(self):
+    def test_validation_drops_unmappable_hash_when_target_functions_are_known(self):
         findings = [{"vulnerability_type": "reentrancy", "affected_functions": ["0x07f7ecb66d788ab01dc93b9b71a88401de7d0f2e"]}]
         contract_info = {"function_details": [{"function": "withdraw", "function_id": "withdraw(uint256)"}]}
 
         validated = AnalyzerAgent._validate_findings(findings, contract_info)
 
+        self.assertEqual(validated, [])
+
+    def test_unmappable_hash_does_not_duplicate_source_grounded_selfdestruct_finding(self):
+        details = [{
+            "contract": "OwnershipBug", "function": "destroy", "function_id": "destroy()",
+            "content": "function destroy() external { selfdestruct(payable(msg.sender)); }",
+        }]
+        findings = [
+            {"vulnerability_type": "selfdestruct", "affected_functions": ["0x4c8f6d77439a5b9e9325212e7e9e8626a875768e"]},
+            {"vulnerability_type": "dangerous_selfdestruct", "affected_functions": ["destroy()"]},
+        ]
+
+        validated = AnalyzerAgent._validate_findings(findings, {
+            "function_details": details,
+            "source_code": "contract OwnershipBug { function destroy() external { selfdestruct(payable(msg.sender)); } }",
+        })
+
         self.assertEqual(len(validated), 1)
-        self.assertEqual(validated[0]["affected_functions"], ["0x07f7ecb66d788ab01dc93b9b71a88401de7d0f2e"])
+        self.assertEqual(validated[0]["affected_functions"], ["destroy()"])
 
     def test_maps_file_line_and_byte_offset_to_enclosing_function(self):
         source = """contract OwnershipBug {

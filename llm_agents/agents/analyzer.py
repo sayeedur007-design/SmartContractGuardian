@@ -802,7 +802,7 @@ class AnalyzerAgent:
             if resolved:
                 if resolved not in normalized:
                     normalized.append(resolved)
-            elif not allowed or str(value).startswith("0x"):
+            elif not allowed:
                 if value not in normalized:
                     normalized.append(value)
         return normalized

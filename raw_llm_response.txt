@@ -4,26 +4,18 @@
     {
       "vulnerability_type": "ACCESS_CONTROL",
       "confidence_score": 1.0,
-      "reasoning": "The contract allows anyone to change the owner and treasury addresses without any authorization checks.",
-      "affected_functions": ["changeOwner(address)", "changeTreasury(address)"],
-      "impact": "Any user can take over the contract, potentially stealing funds or changing other critical state variables.",
-      "exploitation_scenario": "An attacker sends a transaction calling `changeOwner` with their own address. The owner is immediately changed to the attacker's address."
+      "reasoning": "The `transferOwnership` function allows anyone to change the owner of the contract without any access control checks.",
+      "affected_functions": ["transferOwnership(address)"],
+      "impact": "An attacker can take over the contract by calling the `transferOwnership` function and providing their own address as the new owner.",
+      "exploitation_scenario": "1. An attacker deploys an instance of the `OwnershipBug` contract.\n2. The attacker calls the `transferOwnership(address)` function with their own address as the argument.\n3. The contract's ownership is transferred to the attacker, allowing them to perform actions that were only accessible to the original owner."
     },
     {
-      "vulnerability_type": "BUSINESS_LOGIC",
-      "confidence_score": 0.8,
-      "reasoning": "The contract does not have any checks on the total balance of the contract, which could lead to issues if the total balance is manipulated.",
-      "affected_functions": ["withdraw(uint256)"],
-      "impact": "If an attacker can manipulate the total balance of the contract, they might be able to withdraw more funds than they should be allowed to.",
-      "exploitation_scenario": "An attacker exploits a bug in another part of the system that allows them to increase the total balance of the contract. They then call `withdraw` with a large amount, withdrawing more than they are supposed to."
-    },
-    {
-      "vulnerability_type": "BUSINESS_LOGIC",
-      "confidence_score": 0.7,
-      "reasoning": "The contract does not have any checks on the balance of each individual user, which could lead to issues if the balances are manipulated.",
-      "affected_functions": ["withdraw(uint256)"],
-      "impact": "If an attacker can manipulate the balance of another user, they might be able to withdraw more funds than they should be allowed to.",
-      "exploitation_scenario": "An attacker exploits a bug in another part of the system that allows them to increase their balance. They then call `withdraw` with a large amount, withdrawing more than they are supposed to."
+      "vulnerability_type": "ACCESS_CONTROL",
+      "confidence_score": 1.0,
+      "reasoning": "The `destroy` function allows anyone to destroy the contract without any access control checks.",
+      "affected_functions": ["destroy()"],
+      "impact": "An attacker can destroy the contract by calling the `destroy` function, leading to a loss of funds and potential data corruption.",
+      "exploitation_scenario": "1. An attacker deploys an instance of the `OwnershipBug` contract with a balance.\n2. The attacker calls the `destroy()` function.\n3. The contract is destroyed and all funds are sent to the attacker's address."
     }
   ]
 }

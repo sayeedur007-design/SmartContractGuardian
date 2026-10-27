@@ -71,6 +71,8 @@ class ExploitRunner:
         
         actual_retries_attempted = 0
         final_state = "FAILED"
+        vulnerability = poc_data.get("vulnerability", {}) or {}
+        exploit_plan = poc_data.get("exploit_plan", {}) or {}
 
         for attempt in range(self.max_retries + 1):
             if attempt > 0:
@@ -79,6 +81,7 @@ class ExploitRunner:
             emit_status("COMPILING", f"Compiling generated PoC (attempt {attempt + 1})")
             current = path.read_text(encoding="utf-8")
             last_compile = self.validator.compile_candidate(current, attempt=attempt)
+            last_compile["attempt"] = attempt + 1
             
             if last_compile["compiled"]:
                 emit_status("EXECUTING", f"Executing exploit test (attempt {attempt + 1})")
@@ -91,6 +94,14 @@ class ExploitRunner:
                     final_state = "TIMEOUT"
                     emit_status("TIMEOUT", "PoC execution timed out")
                     result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution, runner_state="TIMEOUT")
+                    self._cleanup_job_workspace(path)
+                    return result
+
+                if last_execution.get("failure_reason") == "ForgeLaunchError":
+                    final_state = "ERROR"
+                    emit_status("ERROR", last_execution["runtime_error"])
+                    result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution,
+                                          runner_state="ERROR")
                     self._cleanup_job_workspace(path)
                     return result
 
@@ -118,9 +129,15 @@ class ExploitRunner:
                                           runner_state="NOT_DEMONSTRATED")
                     self._cleanup_job_workspace(path)
                     return result
-                impact_verified = self.validator._has_meaningful_impact_assertion(
-                    self.validator._function_body(current, "testExploit")
-                ) if poc_data.get("poc_strategy", "executable") == "executable" else False
+                target_contract = poc_data.get("target_contract", {}) or {}
+                impact_validation_errors = []
+                impact_verified = False
+                if (last_execution["success"]
+                        and poc_data.get("poc_strategy", "executable") == "executable"):
+                    impact_validation_errors = self.validator.validate_contract(
+                        current, vulnerability, target_contract
+                    )
+                    impact_verified = not impact_validation_errors
                 last_execution["impact_verified"] = impact_verified
                 if last_execution["success"] and impact_verified:
                     final_state = "PASSED"
@@ -129,36 +146,57 @@ class ExploitRunner:
                     result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution, runner_state="PASSED")
                     self._cleanup_job_workspace(path)
                     return result
-                else:
-                    if last_execution["success"] and not impact_verified:
-                        last_execution["success"] = False
-                        last_execution["runtime_error"] = (
-                            "Forge test passed, but the PoC does not assert a meaningful security impact."
-                        )
-                        last_execution["failure_reason"] = "ImpactNotVerified"
-                        output = last_execution["runtime_error"]
-                    final_state = "FAILED"
+                if last_execution["success"] and not impact_verified:
+                    reason = (
+                        "; ".join(impact_validation_errors)
+                        if impact_validation_errors
+                        else "candidate strategy does not provide executable impact evidence"
+                    )
+                    last_execution["runtime_error"] = f"Forge test passed, but impact was not verified: {reason}"
+                    last_execution["failure_reason"] = "ImpactNotVerified"
+                    emit_status("NOT_DEMONSTRATED", last_execution["runtime_error"])
+                    result = self._result(path, actual_retries_attempted, diagnostics, last_compile, last_execution,
+                                          runner_state="NOT_DEMONSTRATED")
+                    self._cleanup_job_workspace(path)
+                    return result
             else:
                 final_state = "FAILED"
                 output = last_compile["output"]
                 diagnostic = self._diagnose(output)
                 diagnostics.append(diagnostic)
+                # Do not combine this candidate's compilation result with a
+                # previous candidate's runtime result in the final report.
+                last_execution = {
+                    "executed": False, "success": False, "impact_verified": False,
+                    "runtime_error": "", "stdout": "", "stderr": "", "output": "",
+                    "execution_time": 0.0, "gas_used": None, "execution_trace": "",
+                    "failure_reason": "", "returncode": None, "is_timeout": False,
+                }
 
             if attempt == self.max_retries:
                 break
 
             current = path.read_text(encoding="utf-8")
-            candidate = self._fix_test_code(current, output, diagnostic, previous_attempt, poc_data.get("target_contract", {}))
-            previous_attempt = current
+            candidate = self._fix_test_code(
+                current, output, diagnostic, previous_attempt,
+                poc_data.get("target_contract", {}), vulnerability, exploit_plan,
+            )
             if not candidate:
-                continue
+                break
             candidate = GeneratorAgent._clean_solidity(candidate)
+            if candidate == current or candidate == previous_attempt:
+                diagnostics.append({
+                    "categories": ["UnchangedRepair"],
+                    "output": "Repair response was identical to the failed candidate; it was not recompiled.",
+                })
+                break
+            previous_attempt = current
             self._write_repair_artifacts(path, candidate, output, attempt)
             target = poc_data.get("target_contract", {"filename": "VulnerableContract.sol", "contract_name": "VulnerableContract", "functions": []})
-            errors = self.validator.validate_contract(candidate, {}, target)
+            errors = self.validator.validate_contract(candidate, vulnerability, target)
             if errors:
                 diagnostics.append({"categories": ["RepairValidationError"], "output": "; ".join(errors)})
-                continue
+                break
             path.write_text(candidate, encoding="utf-8")
 
         emit_status("FAILED", f"PoC failed after {actual_retries_attempted + 1} attempts" if actual_retries_attempted > 0 else "PoC execution failed")
@@ -252,17 +290,24 @@ class ExploitRunner:
                 compile_result=None, execution_result=None, error: str = "", runner_state: str = "FAILED") -> Dict:
         compile_result = compile_result or {"compiled": False, "compile_error": error, "stdout": "", "stderr": "", "compile_time": 0.0}
         execution_result = execution_result or {"executed": False, "success": False, "impact_verified": False, "runtime_error": error, "stdout": "", "stderr": "", "output": "", "execution_time": 0.0, "gas_used": None, "execution_trace": ""}
-        success = bool(compile_result["compiled"] and execution_result["success"] and execution_result.get("impact_verified", False))
+        impact_verified = bool(
+            runner_state == "PASSED"
+            and compile_result["compiled"]
+            and execution_result["executed"]
+            and execution_result["success"]
+            and execution_result.get("impact_verified", False)
+        )
+        success = impact_verified
         return {
             "success": success,
             "runner_state": runner_state,
             "compiled": bool(compile_result["compiled"]),
             "executed": bool(execution_result["executed"]),
-            "impact_verified": bool(execution_result.get("impact_verified", False)),
+            "impact_verified": impact_verified,
             "lifecycle": {
                 "generated": bool(path), "source_validated": bool(path),
                 "compiled": bool(compile_result["compiled"]), "executed": bool(execution_result["executed"]),
-                "impact_demonstrated": bool(execution_result.get("impact_verified", False)),
+                "impact_demonstrated": impact_verified,
             },
             "is_timeout": bool(execution_result.get("is_timeout", False)),
             "compile_error": compile_result.get("compile_error", ""),
@@ -281,7 +326,11 @@ class ExploitRunner:
             "execution_command": execution_result.get("command", []),
             "execution_workspace": execution_result.get("workspace", ""),
             "gas_used": execution_result.get("gas_used"),
-            "execution_trace": execution_result.get("execution_trace", "")
+            "execution_trace": execution_result.get("execution_trace", ""),
+            "final_candidate": (
+                path.read_text(encoding="utf-8") if path and path.is_file() else ""
+            ),
+            "final_attempt": compile_result.get("attempt"),
         }
 
     def _write_execution_artifacts(self, path: Path, code: str, stdout: str, stderr: str,
@@ -336,11 +385,25 @@ class ExploitRunner:
                 return category
         return "ForgeExecutionError" if returncode is not None else "ForgeLaunchError"
 
-    def _fix_test_code(self, current: str, output: str, diagnostic: Dict, previous: str, target: Dict) -> Optional[str]:
+    def _fix_test_code(self, current: str, output: str, diagnostic: Dict, previous: str, target: Dict,
+                       vulnerability: Optional[Dict] = None, exploit_plan: Optional[Dict] = None) -> Optional[str]:
         function_map = ", ".join(target.get("functions", [])) or "none"
         public_members = ", ".join(target.get("public_members", [])) or "none"
+        vulnerability = vulnerability or {}
+        exploit_plan = exploit_plan or {}
         prompt = f"""You repair compact Solidity Foundry tests for qwen2.5-coder:7b. Rewrite this complete test and return only Solidity.
-Preserve the exploit/demonstration intent and address every diagnostic. The target permits only these callable signatures: {function_map}. Its public getters are: {public_members}. Never invent target functions, variables, imports, pragma, or constructor arguments.
+Preserve the exploit/demonstration intent and address every diagnostic. Do not weaken assertions or remove security checks. The target is {target.get('contract_name', 'unknown')} in {target.get('filename', 'unknown')}, with pragma {target.get('pragma', 'unknown')} and constructor {target.get('constructor', 'constructor()')}. It permits only these callable signatures: {function_map}. Its public getters are: {public_members}. Never invent target functions, variables, imports, pragma, or constructor arguments.
+
+ORIGINAL VULNERABILITY OBJECTIVE:
+Type: {vulnerability.get('vulnerability_type', '')}
+Reasoning: {vulnerability.get('reasoning', '')}
+Affected functions: {vulnerability.get('affected_functions', vulnerability.get('functions', []))}
+Code snippet: {vulnerability.get('code_snippet', '')}
+
+ORIGINAL EXPLOIT PLAN:
+Setup: {exploit_plan.get('setup_steps', [])}
+Execution: {exploit_plan.get('execution_steps', [])}
+Validation: {exploit_plan.get('validation_steps', [])}
 
 CURRENT SOLIDITY:
 {current}

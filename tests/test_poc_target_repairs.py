@@ -21,6 +21,36 @@ contract Vault is BaseTestWithBalanceLog {
     assert "assertTrue(true)" not in repaired
 
 
+def test_access_control_finding_selects_owner_transfer_template():
+    agent = GeneratorAgent.__new__(GeneratorAgent)
+    target = {
+        "filename": "OwnershipBug.sol",
+        "contract_name": "OwnershipBug",
+        "functions": ["transferOwnership(address)"],
+        "public_members": ["owner"],
+        "pragma": "^0.8.20",
+        "constructor": "constructor()",
+        "source": "contract OwnershipBug { address public owner; constructor() { owner = msg.sender; } function transferOwnership(address newOwner) external { owner = newOwner; } }",
+    }
+    finding = {
+        "vulnerability_type": "access_control",
+        "affected_functions": ["transferOwnership(address)"],
+    }
+
+    code = agent.generate_poc_contract(
+        finding,
+        {"execution_steps": ["Transfer ownership from an unauthorized account"]},
+        target,
+        [],
+        1,
+    )
+
+    assert "vm.prank(attacker);" in code
+    assert "target.transferOwnership(attacker);" in code
+    assert "assertEq(target.owner(), attacker);" in code
+    assert agent.validate_contract(code, finding, target) == []
+
+
 def test_auto_repair_preserves_contract_instance_address_casts():
     agent = GeneratorAgent.__new__(GeneratorAgent)
     target = {"contract_name": "Vault", "public_members": [], "functions": []}
@@ -39,6 +69,40 @@ contract PocTest is BaseTestWithBalanceLog {
     assert "address(receiver)" in repaired
     assert "address(uint160(target))" not in repaired
     assert "address(uint160(receiver))" not in repaired
+
+
+def test_auto_repair_drops_revert_string_when_target_uses_bare_require():
+    agent = GeneratorAgent.__new__(GeneratorAgent)
+    target = {
+        "contract_name": "Vault",
+        "functions": ["withdraw(uint256)"],
+        "public_members": ["balances"],
+        "source": "contract Vault { mapping(address => uint256) public balances; "
+        "function withdraw(uint256 amount) external { require(balances[msg.sender] >= amount); } }",
+    }
+    code = '''vm.expectRevert(bytes("Not enough balance"));
+target.withdraw(2 ether);'''
+
+    repaired = agent._auto_repair_contract(code, {"vulnerability_type": "reentrancy"}, target)
+
+    assert "vm.expectRevert();" in repaired
+    assert "Not enough balance" not in repaired
+
+
+def test_auto_repair_preserves_revert_string_supported_by_target():
+    agent = GeneratorAgent.__new__(GeneratorAgent)
+    target = {
+        "contract_name": "Vault",
+        "functions": ["withdraw(uint256)"],
+        "public_members": [],
+        "source": 'contract Vault { function withdraw(uint256) external { require(false, "Not enough balance"); } }',
+    }
+    code = '''vm.expectRevert("Not enough balance");
+target.withdraw(2 ether);'''
+
+    repaired = agent._auto_repair_contract(code, {"vulnerability_type": "reentrancy"}, target)
+
+    assert 'vm.expectRevert(bytes("Not enough balance"));' in repaired
 
 
 def test_contract_instance_address_casts_compile_with_solc():
